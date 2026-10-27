@@ -1,7 +1,12 @@
 import type { RunRequest } from "./contracts.js";
 export type AgentRun = { id: string; status: string; result: unknown };
 export class AgentsClient {
-  constructor(private readonly base: string) {
+  constructor(
+    private readonly base: string,
+    private readonly token: string,
+  ) {
+    if (!/^[A-Za-z0-9_-]{32,256}$/.test(token))
+      throw new Error("AGENTS_API_TOKEN must be 32 to 256 URL-safe characters");
     const url = new URL(base);
     if (
       url.protocol !== "http:" ||
@@ -21,7 +26,10 @@ export class AgentsClient {
   ): Promise<AgentRun | undefined> {
     const response = await fetch(new URL(path, this.base), {
       method,
-      headers: body ? { "content-type": "application/json" } : {},
+      headers: {
+        authorization: `Bearer ${this.token}`,
+        ...(body ? { "content-type": "application/json" } : {}),
+      },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(10000),
       redirect: "error",

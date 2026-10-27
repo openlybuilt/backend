@@ -17,6 +17,13 @@ export class RunService {
   async create(request: RunRequest): Promise<BackendRun> {
     const current = await this.store.create(request);
     if (terminal.has(current.status) || current.cancelRequested) return current;
+    if (
+      ["provisioning", "running", "cleaning_up", "cancelling"].includes(
+        current.status,
+      )
+    ) {
+      return (await this.reconcile(request.id)) ?? current;
+    }
     try {
       const remote = await this.agents.request("/runs", "POST", request);
       if (!remote || remote.id !== request.id)
