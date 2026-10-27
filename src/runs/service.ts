@@ -2,7 +2,13 @@ import { AgentsClient } from "./agents-client.js";
 import type { RunRequest } from "./contracts.js";
 import { RunStore, type BackendRun } from "./store.js";
 
-const terminal = new Set(["completed", "failed", "cancelled", "interrupted"]);
+const terminal = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+  "outcome_unknown",
+]);
 export class RunService {
   constructor(
     private readonly store: RunStore,
@@ -34,8 +40,16 @@ export class RunService {
       let remote = await this.agents.request(path, "GET");
       if (remote && current.cancelRequested && !terminal.has(remote.status))
         remote = await this.agents.request(`${path}/cancel`, "POST");
-      if (remote && remote.id === id)
+      if (remote && remote.id === id) {
         await this.store.update(id, remote.status, remote.result);
+      } else if (
+        !remote &&
+        ["provisioning", "running", "cleaning_up", "cancelling"].includes(
+          current.status,
+        )
+      ) {
+        await this.store.update(id, "outcome_unknown", null);
+      }
     } catch {
       /* Keep the last known state when agents is unavailable. */
     }
