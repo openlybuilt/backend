@@ -25,6 +25,17 @@ export class AgentsClient {
     )
       throw new Error("AGENTS_URL must be a loopback HTTP origin");
   }
+  async events(id: string): Promise<unknown[]> {
+    const response = await fetch(new URL(`/runs/${id}/events`, this.base), {
+      headers: { authorization: `Bearer ${this.token}` },
+      signal: AbortSignal.timeout(10000),
+      redirect: "error",
+    });
+    if (!response.ok) throw new Error("Run events unavailable");
+    const events: unknown = await response.json();
+    if (!Array.isArray(events)) throw new Error("Invalid run events");
+    return events;
+  }
   async recording(id: string): Promise<Response | undefined> {
     const response = await fetch(new URL(`/runs/${id}/recording`, this.base), {
       headers: { authorization: `Bearer ${this.token}` },

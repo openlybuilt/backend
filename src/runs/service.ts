@@ -85,6 +85,10 @@ export class RunService {
       ? { ...saved, liveViewUrl }
       : saved;
   }
+  async events(id: string): Promise<unknown[] | undefined> {
+    if (!(await this.store.get(id))) return undefined;
+    return this.agents.events(id);
+  }
   async recording(id: string): Promise<Response | undefined> {
     if (!(await this.store.get(id))) return undefined;
     return this.agents.recording(id);

@@ -275,6 +275,16 @@ const server = createServer((request, response) => {
         throw error;
       }
     }
+    const eventsMatch =
+      /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/events$/i.exec(
+        request.url ?? "",
+      );
+    if (eventsMatch && request.method === "GET") {
+      const events = await runs.events(eventsMatch[1]!.toLowerCase());
+      return events
+        ? send(response, 200, events)
+        : send(response, 404, { error: "Run not found" });
+    }
     const recordingMatch =
       /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/recording$/i.exec(
         request.url ?? "",
