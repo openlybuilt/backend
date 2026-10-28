@@ -44,15 +44,30 @@ export class RunService {
     if (!saved) throw new Error("Run missing");
     return saved;
   }
-  async reconcile(id: string): Promise<BackendRun | undefined> {
+  async reconcile(
+    id: string,
+  ): Promise<(BackendRun & { liveViewUrl?: string }) | undefined> {
     const current = await this.store.get(id);
     if (!current || terminal.has(current.status)) return current;
+    let liveViewUrl: string | undefined;
     try {
       const path = `/runs/${id}`;
       let remote = await this.agents.request(path, "GET");
       if (remote && current.cancelRequested && !terminal.has(remote.status))
         remote = await this.agents.request(`${path}/cancel`, "POST");
       if (remote && remote.id === id) {
+        if (
+          !terminal.has(remote.status) &&
+          typeof remote.liveViewUrl === "string"
+        ) {
+          try {
+            const u = new URL(remote.liveViewUrl);
+            if (u.protocol === "https:" && !u.username && !u.password)
+              liveViewUrl = u.href;
+          } catch {
+            /* Ignore invalid provider URLs. */
+          }
+        }
         await this.store.update(id, remote.status, remote.result, remote.steps);
       } else if (
         !remote &&
@@ -65,7 +80,10 @@ export class RunService {
     } catch {
       /* Keep the last known state when agents is unavailable. */
     }
-    return this.store.get(id);
+    const saved = await this.store.get(id);
+    return saved && liveViewUrl && !terminal.has(saved.status)
+      ? { ...saved, liveViewUrl }
+      : saved;
   }
   async cancel(id: string): Promise<BackendRun | undefined> {
     const current = await this.store.get(id);

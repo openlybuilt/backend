@@ -3,6 +3,7 @@ export type WorkflowStep =
   | { type: "type"; text: string }
   | { type: "press_keys"; keys: string[] }
   | { type: "click"; x: number; y: number }
+  | { type: "click"; target: string }
   | { type: "ai"; instruction: string };
 export type ResolvedWorkflow = { steps: WorkflowStep[] };
 
@@ -64,6 +65,14 @@ export function parseWorkflow(input: unknown): ResolvedWorkflow {
       return { type: "press_keys", keys: step.keys as string[] };
     if (
       step.type === "click" &&
+      exact("type", "target") &&
+      typeof step.target === "string" &&
+      step.target.trim().length > 0 &&
+      step.target.length <= 10000
+    )
+      return { type: "click", target: step.target };
+    if (
+      step.type === "click" &&
       exact("type", "x", "y") &&
       typeof step.x === "number" &&
       Number.isInteger(step.x) &&
@@ -121,6 +130,8 @@ export function resolveWorkflow(
         return { ...step, text: replace(step.text, strings) };
       if (step.type === "ai")
         return { ...step, instruction: replace(step.instruction, strings) };
+      if (step.type === "click" && "target" in step)
+        return { ...step, target: replace(step.target, strings) };
       return step;
     }),
   });
@@ -158,7 +169,7 @@ export function parseDefinition(input: unknown): WorkflowDefinition {
   );
   const sample = (value.steps as Array<Record<string, unknown>>).map((step) => {
     const copy = { ...step };
-    for (const key of ["url", "text", "instruction"]) {
+    for (const key of ["url", "text", "instruction", "target"]) {
       if (typeof copy[key] === "string") {
         const original = copy[key] as string;
         copy[key] =

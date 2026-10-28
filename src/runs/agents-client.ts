@@ -4,6 +4,7 @@ export type AgentRun = {
   status: string;
   result: unknown;
   steps?: unknown;
+  liveViewUrl?: string;
 };
 export class AgentsClient {
   constructor(
