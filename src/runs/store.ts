@@ -74,6 +74,13 @@ export class RunStore {
     );
     return result.rows[0] as BackendRun | undefined;
   }
+  async listForWorkflow(workflowId: string): Promise<BackendRun[]> {
+    const result = await this.pool.query(
+      'SELECT id, status, result, steps, workflow_id AS "workflowId", workflow_version AS "workflowVersion", created_at AS "createdAt", updated_at AS "updatedAt" FROM backend_runs WHERE workflow_id=$1 ORDER BY created_at DESC LIMIT 100',
+      [workflowId],
+    );
+    return result.rows as BackendRun[];
+  }
   async requestCancel(id: string): Promise<void> {
     await this.pool.query(
       "UPDATE backend_runs SET cancel_requested=true, updated_at=now() WHERE id=$1",

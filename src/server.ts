@@ -125,6 +125,8 @@ const server = createServer((request, response) => {
           ? send(response, 201, version)
           : send(response, 404, { error: "Workflow not found" });
       }
+      if (request.method === "GET" && workflowMatch[2] === "runs")
+        return send(response, 200, await store.listForWorkflow(workflowId));
       if (request.method === "POST" && workflowMatch[2] === "runs") {
         if (
           !/^application\/json(?:\s*;|$)/i.test(
@@ -220,6 +222,37 @@ const server = createServer((request, response) => {
           return send(response, 409, { error: error.message });
         throw error;
       }
+    }
+    const recordingMatch =
+      /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/recording$/i.exec(
+        request.url ?? "",
+      );
+    if (recordingMatch && request.method === "GET") {
+      const upstream = await runs.recording(recordingMatch[1]!.toLowerCase());
+      if (!upstream)
+        return send(response, 404, { error: "Recording not found" });
+      response.writeHead(200, {
+        "content-type": "video/mp4",
+        "cache-control": "no-store",
+        ...(upstream.headers.get("content-length")
+          ? { "content-length": upstream.headers.get("content-length")! }
+          : {}),
+      });
+      const reader = upstream.body!.getReader();
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!response.write(value))
+            await new Promise<void>((resolve) =>
+              response.once("drain", resolve),
+            );
+        }
+        response.end();
+      } finally {
+        reader.releaseLock();
+      }
+      return;
     }
     const match =
       /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(\/cancel)?$/i.exec(

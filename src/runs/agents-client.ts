@@ -25,6 +25,17 @@ export class AgentsClient {
     )
       throw new Error("AGENTS_URL must be a loopback HTTP origin");
   }
+  async recording(id: string): Promise<Response | undefined> {
+    const response = await fetch(new URL(`/runs/${id}/recording`, this.base), {
+      headers: { authorization: `Bearer ${this.token}` },
+      signal: AbortSignal.timeout(30000),
+      redirect: "error",
+    });
+    if (response.status === 404) return undefined;
+    if (!response.ok || !response.body)
+      throw new Error("Recording unavailable");
+    return response;
+  }
   async request(
     path: string,
     method: "GET" | "POST",

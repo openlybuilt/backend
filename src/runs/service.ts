@@ -85,6 +85,10 @@ export class RunService {
       ? { ...saved, liveViewUrl }
       : saved;
   }
+  async recording(id: string): Promise<Response | undefined> {
+    if (!(await this.store.get(id))) return undefined;
+    return this.agents.recording(id);
+  }
   async cancel(id: string): Promise<BackendRun | undefined> {
     const current = await this.store.get(id);
     if (!current || terminal.has(current.status)) return current;
