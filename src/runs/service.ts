@@ -28,7 +28,12 @@ export class RunService {
       const remote = await this.agents.request("/runs", "POST", request);
       if (!remote || remote.id !== request.id)
         throw new Error("Invalid agents response");
-      await this.store.update(request.id, remote.status, remote.result);
+      await this.store.update(
+        request.id,
+        remote.status,
+        remote.result,
+        remote.steps,
+      );
       const fresh = await this.store.get(request.id);
       if (fresh?.cancelRequested && !terminal.has(remote.status))
         await this.reconcile(request.id);
@@ -48,7 +53,7 @@ export class RunService {
       if (remote && current.cancelRequested && !terminal.has(remote.status))
         remote = await this.agents.request(`${path}/cancel`, "POST");
       if (remote && remote.id === id) {
-        await this.store.update(id, remote.status, remote.result);
+        await this.store.update(id, remote.status, remote.result, remote.steps);
       } else if (
         !remote &&
         ["provisioning", "running", "cleaning_up", "cancelling"].includes(

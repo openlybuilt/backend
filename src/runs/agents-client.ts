@@ -1,5 +1,10 @@
 import type { RunRequest } from "./contracts.js";
-export type AgentRun = { id: string; status: string; result: unknown };
+export type AgentRun = {
+  id: string;
+  status: string;
+  result: unknown;
+  steps?: unknown;
+};
 export class AgentsClient {
   constructor(
     private readonly base: string,
@@ -30,7 +35,15 @@ export class AgentsClient {
         authorization: `Bearer ${this.token}`,
         ...(body ? { "content-type": "application/json" } : {}),
       },
-      body: body ? JSON.stringify(body) : undefined,
+      body: body
+        ? JSON.stringify({
+            id: body.id,
+            instruction: body.instruction,
+            maxSteps: body.maxSteps,
+            timeoutMs: body.timeoutMs,
+            ...(body.workflow ? { workflow: body.workflow } : {}),
+          })
+        : undefined,
       signal: AbortSignal.timeout(10000),
       redirect: "error",
     });
