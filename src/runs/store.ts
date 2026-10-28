@@ -74,11 +74,11 @@ export class RunStore {
     );
     return result.rows[0] as BackendRun | undefined;
   }
-  async listRecent(): Promise<unknown[]> {
+  async listRecent(): Promise<(BackendRun & { workflowName: string })[]> {
     const result = await this.pool.query(
       `SELECT r.id, r.status, r.result, r.steps, r.workflow_id AS "workflowId", r.workflow_version AS "workflowVersion", r.created_at AS "createdAt", r.updated_at AS "updatedAt", v.definition->>'name' AS "workflowName" FROM backend_runs r JOIN workflow_versions v ON v.workflow_id = r.workflow_id AND v.version = r.workflow_version ORDER BY r.created_at DESC LIMIT 100`,
     );
-    return result.rows;
+    return result.rows as (BackendRun & { workflowName: string })[];
   }
   async listForWorkflow(workflowId: string): Promise<BackendRun[]> {
     const result = await this.pool.query(

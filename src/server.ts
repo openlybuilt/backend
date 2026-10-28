@@ -61,8 +61,33 @@ const server = createServer((request, response) => {
     ) {
       return send(response, 401, { error: "Unauthorized" });
     }
-    if (request.method === "GET" && request.url === "/runs")
-      return send(response, 200, await store.listRecent());
+    if (request.method === "GET" && request.url === "/runs") {
+      const items = await store.listRecent();
+      const active = new Set([
+        "dispatch_pending",
+        "dispatch_unknown",
+        "provisioning",
+        "running",
+        "cleaning_up",
+        "cancelling",
+      ]);
+      const recent = await Promise.all(
+        items.map(async (item) => {
+          if (!active.has(item.status)) return item;
+          const current = await runs.reconcile(item.id);
+          return current
+            ? {
+                ...item,
+                status: current.status,
+                result: current.result,
+                steps: current.steps,
+                updatedAt: current.updatedAt,
+              }
+            : item;
+        }),
+      );
+      return send(response, 200, recent);
+    }
     if (request.method === "GET" && request.url === "/workflows")
       return send(response, 200, await workflows.list());
     if (request.method === "POST" && request.url === "/workflows") {
