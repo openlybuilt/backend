@@ -61,6 +61,8 @@ const server = createServer((request, response) => {
     ) {
       return send(response, 401, { error: "Unauthorized" });
     }
+    if (request.method === "GET" && request.url === "/runs")
+      return send(response, 200, await store.listRecent());
     if (request.method === "GET" && request.url === "/workflows")
       return send(response, 200, await workflows.list());
     if (request.method === "POST" && request.url === "/workflows") {
