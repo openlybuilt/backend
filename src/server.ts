@@ -147,7 +147,32 @@ const server = createServer((request, response) => {
             error: error instanceof Error ? error.message : "Invalid workflow",
           });
         }
-        const version = await workflows.addVersion(workflowId, definition);
+        const header = request.headers["if-match"];
+        if (
+          header !== undefined &&
+          (typeof header !== "string" ||
+            !/^[1-9][0-9]{0,9}$/.test(header) ||
+            Number(header) > 2147483647)
+        )
+          return send(response, 400, { error: "Invalid workflow version" });
+        let version;
+        try {
+          version = await workflows.addVersion(
+            workflowId,
+            definition,
+            header === undefined ? undefined : Number(header),
+          );
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            error.message === "Workflow version conflict"
+          )
+            return send(response, 409, {
+              error:
+                "This workflow changed in another session. Reload before saving.",
+            });
+          throw error;
+        }
         return version
           ? send(response, 201, version)
           : send(response, 404, { error: "Workflow not found" });
