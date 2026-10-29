@@ -61,7 +61,7 @@ export class IdentityClient {
         "content-type": "application/json",
       },
       body: JSON.stringify({ token }),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(deletion ? 10000 : 5000),
       redirect: "error",
     });
     if (response.status === 401 || (deletion && response.status === 403)) {
