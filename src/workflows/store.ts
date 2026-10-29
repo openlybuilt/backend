@@ -9,12 +9,18 @@ export type WorkflowVersion = {
 };
 export class WorkflowStore {
   constructor(private readonly pool: pg.Pool) {}
-  async create(definition: WorkflowDefinition): Promise<WorkflowVersion> {
+  async create(
+    definition: WorkflowDefinition,
+    workspaceId: string,
+  ): Promise<WorkflowVersion> {
     const id = randomUUID();
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("INSERT INTO workflows(id) VALUES ($1)", [id]);
+      await client.query(
+        "INSERT INTO workflows(id,workspace_id) VALUES ($1,$2)",
+        [id, workspaceId],
+      );
       const result = await client.query(
         'INSERT INTO workflow_versions(workflow_id,version,definition) VALUES ($1,1,$2::jsonb) RETURNING workflow_id AS id, version, definition, created_at AS "createdAt"',
         [id, JSON.stringify(definition)],
@@ -31,14 +37,15 @@ export class WorkflowStore {
   async addVersion(
     id: string,
     definition: WorkflowDefinition,
+    workspaceId: string,
     expectedVersion?: number,
   ): Promise<WorkflowVersion | undefined> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
       const owner = await client.query(
-        "SELECT id FROM workflows WHERE id=$1 FOR UPDATE",
-        [id],
+        "SELECT id FROM workflows WHERE id=$1 AND workspace_id=$2 FOR UPDATE",
+        [id, workspaceId],
       );
       if (!owner.rowCount) {
         await client.query("ROLLBACK");
@@ -67,17 +74,19 @@ export class WorkflowStore {
   }
   async get(
     id: string,
+    workspaceId: string,
     version?: number,
   ): Promise<WorkflowVersion | undefined> {
     const result = await this.pool.query(
-      'SELECT workflow_id AS id,version,definition,created_at AS "createdAt" FROM workflow_versions WHERE workflow_id=$1 AND ($2::integer IS NULL OR version=$2) ORDER BY version DESC LIMIT 1',
-      [id, version ?? null],
+      'SELECT v.workflow_id AS id,v.version,v.definition,v.created_at AS "createdAt" FROM workflow_versions v JOIN workflows w ON w.id=v.workflow_id WHERE v.workflow_id=$1 AND w.workspace_id=$2 AND ($3::integer IS NULL OR v.version=$3) ORDER BY v.version DESC LIMIT 1',
+      [id, workspaceId, version ?? null],
     );
     return result.rows[0] as WorkflowVersion | undefined;
   }
-  async list(): Promise<WorkflowVersion[]> {
+  async list(workspaceId: string): Promise<WorkflowVersion[]> {
     const result = await this.pool.query(
-      'SELECT DISTINCT ON (workflow_id) workflow_id AS id,version,definition,created_at AS "createdAt" FROM workflow_versions ORDER BY workflow_id,version DESC',
+      'SELECT DISTINCT ON (v.workflow_id) v.workflow_id AS id,v.version,v.definition,v.created_at AS "createdAt" FROM workflow_versions v JOIN workflows w ON w.id=v.workflow_id WHERE w.workspace_id=$1 ORDER BY v.workflow_id,v.version DESC',
+      [workspaceId],
     );
     return result.rows as WorkflowVersion[];
   }
