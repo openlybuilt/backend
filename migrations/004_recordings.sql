@@ -8,3 +8,5 @@ CREATE TABLE IF NOT EXISTS run_recordings (
   CHECK ((status = 'saved' AND video IS NOT NULL AND octet_length(video) BETWEEN 16 AND 104857600)
     OR (status <> 'saved' AND video IS NULL))
 );
+CREATE INDEX IF NOT EXISTS backend_runs_workflow_created_idx
+  ON backend_runs (workflow_id, created_at DESC, id DESC);

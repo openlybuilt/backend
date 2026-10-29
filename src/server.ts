@@ -146,6 +146,11 @@ const server = createServer((request, response) => {
           ? send(response, 200, found)
           : send(response, 404, { error: "Workflow not found" });
       }
+      if (request.method === "GET" && workflowMatch[2] === "runs") {
+        if (!(await workflows.get(workflowId)))
+          return send(response, 404, { error: "Workflow not found" });
+        return send(response, 200, await store.listForWorkflow(workflowId));
+      }
       if (request.method === "POST" && workflowMatch[2] === "versions") {
         if (
           !/^application\/json(?:\s*;|$)/i.test(

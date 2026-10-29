@@ -7,6 +7,18 @@ export type BackendRun = RunRecord & {
   cancelRequested: boolean;
   recordingStatus?: "pending" | "saved" | "failed" | "unavailable";
 };
+export type WorkflowRun = Pick<
+  BackendRun,
+  | "id"
+  | "status"
+  | "result"
+  | "steps"
+  | "workflowId"
+  | "workflowVersion"
+  | "createdAt"
+  | "updatedAt"
+  | "recordingStatus"
+>;
 export class RunStore {
   readonly pool: pg.Pool;
   private readonly lock: pg.Client;
@@ -98,6 +110,24 @@ export class RunStore {
         recordingStatus: record.recordingStatus,
       };
     return record;
+  }
+  async listForWorkflow(workflowId: string): Promise<WorkflowRun[]> {
+    const result = await this.pool.query(
+      `SELECT id,status,result,steps,workflow_id AS "workflowId",workflow_version AS "workflowVersion",created_at AS "createdAt",updated_at AS "updatedAt",COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE workflow_id=$1 ORDER BY created_at DESC,id DESC LIMIT 100`,
+      [workflowId],
+    );
+    return result.rows.map((record: WorkflowRun) => {
+      if (
+        record.result &&
+        typeof record.result === "object" &&
+        !Array.isArray(record.result)
+      )
+        record.result = {
+          ...record.result,
+          recordingStatus: record.recordingStatus,
+        };
+      return record;
+    });
   }
   async requestCancel(id: string): Promise<void> {
     await this.pool.query(
