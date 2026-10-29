@@ -12,7 +12,7 @@ export const defaultWorkflow = parseDefinition({
       seconds: 15,
     },
     {
-      text: "{{message}}",
+      text: "Hello from Virela!",
       type: "type",
       region: "Top left",
       target: "The Text input field",
@@ -33,10 +33,10 @@ export const defaultWorkflow = parseDefinition({
     {
       type: "ai",
       instruction:
-        "Confirm the Text input field contains exactly {{message}} and the Default checkbox is selected. Do not submit the form or change anything.",
+        "Confirm the Text input field contains exactly Hello from Virela! and the Default checkbox is selected. Do not submit the form or change anything.",
     },
   ],
-  inputs: ["message"],
+  inputs: [],
   description:
     "Try navigation, waiting, text entry, keys, scrolling, clicking, and AI checks without submitting a form.",
 });
