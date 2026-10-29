@@ -91,7 +91,7 @@ export class AccountDeletionService {
   }
   private async process(): Promise<void> {
     const jobs = await this.pool.query<Job>(
-      "SELECT identity_hash,issuer,subject,workspace_id,state FROM account_deletions WHERE state <> 'deleted' ORDER BY updated_at LIMIT 100",
+      "SELECT identity_hash,issuer,subject,workspace_id,state FROM account_deletions WHERE state IN ('pending','data_deleted') ORDER BY updated_at LIMIT 100",
     );
     for (const job of jobs.rows) {
       try {
@@ -107,16 +107,29 @@ export class AccountDeletionService {
   }
   private async processOne(job: Job): Promise<void> {
     if (job.state === "pending") {
-      const ids = await this.pool.query<{ id: string }>(
-        "SELECT id FROM backend_runs WHERE workspace_id=$1",
+      const ids = await this.pool.query<{
+        id: string;
+        status: string;
+        result: unknown;
+        contains_secrets: boolean;
+      }>(
+        "SELECT id,status,result,contains_secrets FROM backend_runs WHERE workspace_id=$1",
         [job.workspace_id],
       );
       let active = false;
-      for (const { id } of ids.rows) {
+      for (const { id, status, result, contains_secrets } of ids.rows) {
         const remote = await this.agents.request(`/runs/${id}`, "GET");
         if (remote) {
           if (remote.id !== id) throw new Error("Invalid agents response");
           await this.agents.request(`/runs/${id}/cancel`, "POST");
+          active = true;
+        } else if (
+          !["completed", "failed", "cancelled"].includes(status) ||
+          !result ||
+          (status === "failed" && contains_secrets) ||
+          (typeof result === "object" && "cleanupError" in result)
+        ) {
+          // A missing in-memory run is not evidence its browser was cleaned up.
           active = true;
         }
       }
@@ -130,6 +143,16 @@ export class AccountDeletionService {
       const client = await this.pool.connect();
       try {
         await client.query("BEGIN");
+        // Provider cleanup is not implemented yet; retain references and do not
+        // claim account deletion completed for runs that could have replays.
+        const providerCleanup = await client.query(
+          "SELECT 1 FROM backend_runs WHERE workspace_id=$1 AND workflow_id IS NOT NULL LIMIT 1",
+          [job.workspace_id],
+        );
+        await client.query(
+          "INSERT INTO account_deletion_replays(identity_hash,run_id,browser_id,replay_id) SELECT $1,r.run_id,r.browser_id,r.replay_id FROM run_recordings r JOIN backend_runs b ON b.id=r.run_id WHERE b.workspace_id=$2 ON CONFLICT DO NOTHING",
+          [job.identity_hash, job.workspace_id],
+        );
         await client.query("DELETE FROM backend_runs WHERE workspace_id=$1", [
           job.workspace_id,
         ]);
@@ -151,10 +174,16 @@ export class AccountDeletionService {
           [job.issuer, job.subject],
         );
         await client.query(
-          "UPDATE account_deletions SET state='data_deleted',workspace_id=NULL,updated_at=now() WHERE identity_hash=$1",
-          [job.identity_hash],
+          "UPDATE account_deletions SET state=$2,workspace_id=NULL,updated_at=now() WHERE identity_hash=$1",
+          [
+            job.identity_hash,
+            providerCleanup.rowCount
+              ? "provider_cleanup_pending"
+              : "data_deleted",
+          ],
         );
         await client.query("COMMIT");
+        if (providerCleanup.rowCount) return;
       } catch (error) {
         await client.query("ROLLBACK").catch(() => undefined);
         throw error;
