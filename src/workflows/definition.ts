@@ -2,6 +2,11 @@ export type WorkflowStep =
   | { type: "navigate"; url: string }
   | { type: "type"; text: string; target?: string; region?: string }
   | { type: "wait"; seconds: number }
+  | {
+      type: "scroll";
+      direction: "up" | "down" | "left" | "right";
+      pixels: number;
+    }
   | { type: "press_keys"; keys: string[] }
   | { type: "click"; x: number; y: number }
   | { type: "click"; target: string }
@@ -67,6 +72,19 @@ export function parseWorkflow(input: unknown): ResolvedWorkflow {
       step.seconds <= 600
     )
       return { type: "wait", seconds: step.seconds };
+    if (
+      step.type === "scroll" &&
+      exact("type", "direction", "pixels") &&
+      (step.direction === "up" ||
+        step.direction === "down" ||
+        step.direction === "left" ||
+        step.direction === "right") &&
+      typeof step.pixels === "number" &&
+      Number.isInteger(step.pixels) &&
+      step.pixels >= 1 &&
+      step.pixels <= 100000
+    )
+      return { type: "scroll", direction: step.direction, pixels: step.pixels };
     if (
       step.type === "ai" &&
       exact("type", "instruction") &&
