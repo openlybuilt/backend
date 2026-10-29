@@ -42,6 +42,17 @@ export class RecordingStore {
     );
     return (result.rows[0] as RecordingMetadata | undefined) ?? this.get(id);
   }
+  async read(
+    id: string,
+    offset: number,
+    bytes: number,
+  ): Promise<Buffer | undefined> {
+    const result = await this.pool.query(
+      "SELECT substring(video FROM $2::integer FOR $3::integer) AS video FROM run_recordings WHERE run_id=$1 AND status='saved'",
+      [id, offset + 1, bytes],
+    );
+    return result.rows[0]?.video as Buffer | undefined;
+  }
   async expire(): Promise<void> {
     await this.pool.query(
       "UPDATE run_recordings r SET status='failed',updated_at=now() FROM backend_runs b WHERE r.run_id=b.id AND r.status='pending' AND ((b.status IN ('completed','failed','cancelled','interrupted','outcome_unknown') AND b.updated_at < now()-interval '120 seconds') OR b.created_at + (b.timeout_ms+180000)*interval '1 millisecond' < now())",

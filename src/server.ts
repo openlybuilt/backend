@@ -5,7 +5,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { RecordingStore } from "./recordings/store.js";
-import { recordingUpload } from "./recordings/routes.js";
+import { recordingPlayback, recordingUpload } from "./recordings/routes.js";
 import { AgentsClient } from "./runs/agents-client.js";
 import { parseRun } from "./runs/contracts.js";
 import { parseUpdate } from "./runs/updates.js";
@@ -101,6 +101,7 @@ const server = createServer((request, response) => {
     ) {
       return send(response, 401, { error: "Unauthorized" });
     }
+    if (await recordingPlayback(request, response, recordings)) return;
     if (request.method === "GET" && request.url === "/workflows")
       return send(response, 200, await workflows.list());
     if (request.method === "POST" && request.url === "/workflows") {

@@ -117,3 +117,73 @@ export async function recordingUpload(
   }
   return true;
 }
+
+export async function recordingPlayback(
+  request: IncomingMessage,
+  response: ServerResponse,
+  recordings: RecordingStore,
+): Promise<boolean> {
+  const match = new RegExp(`^/runs/${runId}/recording$`, "i").exec(
+    request.url ?? "",
+  );
+  if (!match || !["GET", "HEAD"].includes(request.method ?? "")) return false;
+  const id = match[1]!.toLowerCase();
+  const metadata = await recordings.get(id);
+  if (metadata?.status !== "saved" || !metadata.bytes) {
+    send(response, 404, { error: "Recording not available" });
+    return true;
+  }
+  const size = metadata.bytes;
+  let start = 0,
+    end = size - 1;
+  const range = request.headers.range;
+  if (range !== undefined) {
+    const parsed = /^bytes=(\d*)-(\d*)$/.exec(range);
+    let valid = Boolean(parsed && (parsed[1] || parsed[2]));
+    if (parsed && valid) {
+      if (parsed[1]) {
+        start = Number(parsed[1]);
+        end = parsed[2] ? Number(parsed[2]) : size - 1;
+      } else {
+        const suffix = Number(parsed[2]);
+        valid = Number.isSafeInteger(suffix) && suffix > 0;
+        start = Math.max(0, size - suffix);
+      }
+      valid =
+        valid &&
+        Number.isSafeInteger(start) &&
+        Number.isSafeInteger(end) &&
+        start < size &&
+        start <= end;
+      end = Math.min(end, size - 1);
+    }
+    if (!valid) {
+      response.writeHead(416, {
+        "content-range": `bytes */${size}`,
+        "accept-ranges": "bytes",
+        "content-length": "0",
+      });
+      response.end();
+      return true;
+    }
+  }
+  const video =
+    request.method === "HEAD"
+      ? undefined
+      : await recordings.read(id, start, end - start + 1);
+  if (request.method !== "HEAD" && !video) {
+    send(response, 404, { error: "Recording not available" });
+    return true;
+  }
+  response.writeHead(range === undefined ? 200 : 206, {
+    "content-type": "video/mp4",
+    "content-length": end - start + 1,
+    "accept-ranges": "bytes",
+    "cache-control": "private, no-store",
+    ...(range === undefined
+      ? {}
+      : { "content-range": `bytes ${start}-${end}/${size}` }),
+  });
+  response.end(video);
+  return true;
+}
