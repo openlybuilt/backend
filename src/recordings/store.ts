@@ -27,7 +27,7 @@ export class RecordingStore {
     replayId?: string,
   ): Promise<RecordingMetadata | undefined> {
     const result = await this.pool.query(
-      `INSERT INTO run_recordings (run_id,status,browser_id,replay_id) SELECT id,$2,$3,$4 FROM backend_runs WHERE id=$1 AND recording_enabled ON CONFLICT (run_id) DO UPDATE SET status=EXCLUDED.status,browser_id=COALESCE(EXCLUDED.browser_id,run_recordings.browser_id),replay_id=COALESCE(EXCLUDED.replay_id,run_recordings.replay_id),updated_at=now() WHERE run_recordings.status='pending' RETURNING ${columns}`,
+      `INSERT INTO run_recordings (run_id,status,browser_id,replay_id) SELECT id,$2,$3,$4 FROM backend_runs WHERE id=$1 AND recording_enabled ON CONFLICT (run_id) DO UPDATE SET status=CASE WHEN run_recordings.status='deleted' THEN 'deleted' ELSE EXCLUDED.status END,browser_id=COALESCE(EXCLUDED.browser_id,run_recordings.browser_id),replay_id=COALESCE(EXCLUDED.replay_id,run_recordings.replay_id),updated_at=now() WHERE run_recordings.status IN ('pending','deleted') RETURNING ${columns}`,
       [id, status, browserId ?? null, replayId ?? null],
     );
     return (result.rows[0] as RecordingMetadata | undefined) ?? this.get(id);

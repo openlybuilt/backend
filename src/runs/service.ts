@@ -73,7 +73,17 @@ export class RunService {
             message: "Run cancelled before execution",
           });
         } else {
-          const remote = await this.agents.request("/runs", "POST", request);
+          const preference = await this.store.pool.query(
+            "SELECT recording_stop_requested FROM backend_runs WHERE id=$1",
+            [request.id],
+          );
+          const remote = await this.agents.request(
+            "/runs",
+            "POST",
+            preference.rows[0]?.recording_stop_requested
+              ? { ...request, recordingEnabled: false }
+              : request,
+          );
           if (!remote || remote.id !== request.id)
             throw new Error("Invalid agents response");
           // The acknowledgement never overwrites progress already reported.
@@ -90,6 +100,25 @@ export class RunService {
   }
   private async reconcileActive(): Promise<void> {
     for (const id of await this.store.activeIds()) await this.reconcile(id);
+    const pendingStops = await this.store.pool.query<{ id: string }>(
+      "SELECT id FROM backend_runs WHERE recording_stop_requested",
+    );
+    for (const { id } of pendingStops.rows) {
+      try {
+        const stopped = await this.agents.request(
+          `/runs/${id}/recording/stop`,
+          "POST",
+        );
+        const current = await this.store.get(id);
+        if (stopped || (current && terminal.has(current.status)))
+          await this.store.pool.query(
+            "UPDATE backend_runs SET recording_stop_requested=false WHERE id=$1",
+            [id],
+          );
+      } catch {
+        /* Retry until the run ends. */
+      }
+    }
     await this.recordings.expire();
   }
   private async reconcile(id: string): Promise<void> {

@@ -18,6 +18,7 @@ export type WorkflowRun = Pick<
   | "createdAt"
   | "updatedAt"
   | "recordingStatus"
+  | "recordingEnabled"
 >;
 export type RecentWorkflowRun = WorkflowRun & { workflowName: string };
 
@@ -110,31 +111,49 @@ export class RunStore {
   }
   async create(request: RunRequest): Promise<BackendRun> {
     if (!request.workspaceId) throw new Error("Workspace is required");
-    await this.pool.query(
-      "INSERT INTO backend_runs (id, instruction, max_steps, timeout_ms, status,workflow,workflow_id,workflow_version,workflow_inputs,workspace_id,request_fingerprint,contains_secrets,recording_enabled) VALUES ($1,$2,$3,$4,'dispatch_pending',$5::jsonb,$6::uuid,$7::integer,$8::jsonb,$9::uuid,$10,$11,$12) ON CONFLICT (id) DO NOTHING",
-      [
-        request.id,
-        request.instruction,
-        request.maxSteps,
-        request.timeoutMs,
-        request.requestFingerprint
-          ? null
-          : request.workflow
-            ? JSON.stringify(request.workflow)
-            : null,
-        request.workflowId ?? null,
-        request.workflowVersion ?? null,
-        request.requestFingerprint
-          ? null
-          : request.workflowInputs
-            ? JSON.stringify(request.workflowInputs)
-            : null,
-        request.workspaceId,
-        request.requestFingerprint ?? null,
-        request.containsSecrets ?? false,
-        request.recordingEnabled !== false,
-      ],
-    );
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const preference = await client.query(
+        "SELECT recordings_allowed FROM workspaces WHERE id=$1 FOR UPDATE",
+        [request.workspaceId],
+      );
+      if (!preference.rows[0]) throw new Error("Workspace not found");
+      request.recordingEnabled =
+        request.recordingEnabled !== false &&
+        preference.rows[0].recordings_allowed;
+      await client.query(
+        "INSERT INTO backend_runs (id, instruction, max_steps, timeout_ms, status,workflow,workflow_id,workflow_version,workflow_inputs,workspace_id,request_fingerprint,contains_secrets,recording_enabled) VALUES ($1,$2,$3,$4,'dispatch_pending',$5::jsonb,$6::uuid,$7::integer,$8::jsonb,$9::uuid,$10,$11,$12) ON CONFLICT (id) DO NOTHING",
+        [
+          request.id,
+          request.instruction,
+          request.maxSteps,
+          request.timeoutMs,
+          request.requestFingerprint
+            ? null
+            : request.workflow
+              ? JSON.stringify(request.workflow)
+              : null,
+          request.workflowId ?? null,
+          request.workflowVersion ?? null,
+          request.requestFingerprint
+            ? null
+            : request.workflowInputs
+              ? JSON.stringify(request.workflowInputs)
+              : null,
+          request.workspaceId,
+          request.requestFingerprint ?? null,
+          request.containsSecrets ?? false,
+          request.recordingEnabled !== false,
+        ],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
     const record = await this.get(request.id);
     if (!record) throw new Error("Run insert failed");
     const stored = await this.pool.query<{
@@ -184,7 +203,7 @@ export class RunStore {
   }
   async listRecent(workspaceId: string): Promise<RecentWorkflowRun[]> {
     const result = await this.pool.query(
-      `SELECT r.id,r.status,r.result,r.steps,r.workflow_id AS "workflowId",r.workflow_version AS "workflowVersion",r.created_at AS "createdAt",r.updated_at AS "updatedAt",v.definition->>'name' AS "workflowName",COALESCE((SELECT status FROM run_recordings WHERE run_id=r.id),'unavailable') AS "recordingStatus" FROM backend_runs r JOIN workflow_versions v ON v.workflow_id=r.workflow_id AND v.version=r.workflow_version WHERE r.workspace_id=$1 ORDER BY r.created_at DESC,r.id DESC LIMIT 100`,
+      `SELECT r.id,r.status,r.result,r.steps,r.workflow_id AS "workflowId",r.workflow_version AS "workflowVersion",r.created_at AS "createdAt",r.updated_at AS "updatedAt",r.recording_enabled AS "recordingEnabled",v.definition->>'name' AS "workflowName",COALESCE((SELECT status FROM run_recordings WHERE run_id=r.id),'unavailable') AS "recordingStatus" FROM backend_runs r JOIN workflow_versions v ON v.workflow_id=r.workflow_id AND v.version=r.workflow_version WHERE r.workspace_id=$1 ORDER BY r.created_at DESC,r.id DESC LIMIT 100`,
       [workspaceId],
     );
     return result.rows.map((record: RecentWorkflowRun) =>
@@ -196,7 +215,7 @@ export class RunStore {
     workspaceId: string,
   ): Promise<WorkflowRun[]> {
     const result = await this.pool.query(
-      `SELECT id,status,result,steps,workflow_id AS "workflowId",workflow_version AS "workflowVersion",created_at AS "createdAt",updated_at AS "updatedAt",COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY created_at DESC,id DESC LIMIT 100`,
+      `SELECT id,status,result,steps,workflow_id AS "workflowId",workflow_version AS "workflowVersion",created_at AS "createdAt",updated_at AS "updatedAt",recording_enabled AS "recordingEnabled",COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY created_at DESC,id DESC LIMIT 100`,
       [workflowId, workspaceId],
     );
     return result.rows.map((record: WorkflowRun) =>
