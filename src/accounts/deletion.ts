@@ -145,8 +145,11 @@ export class AccountDeletionService {
         await client.query("BEGIN");
         // Provider cleanup is not implemented yet; retain references and do not
         // claim account deletion completed for runs that could have replays.
+        const recordingColumn = await client.query(
+          "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name='backend_runs' AND column_name='recording_enabled'",
+        );
         const providerCleanup = await client.query(
-          "SELECT 1 FROM backend_runs WHERE workspace_id=$1 AND workflow_id IS NOT NULL LIMIT 1",
+          `SELECT 1 FROM backend_runs WHERE workspace_id=$1 AND workflow_id IS NOT NULL ${recordingColumn.rowCount ? "AND recording_enabled" : ""} LIMIT 1`,
           [job.workspace_id],
         );
         await client.query(
