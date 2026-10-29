@@ -1,10 +1,19 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 
-export const maxRecordingBytes = 100 * 1024 * 1024;
 const chunkBytes = 1024 * 1024;
 export class InvalidRecordingError extends Error {}
+async function* recordingBody(
+  source: AsyncIterable<Uint8Array>,
+): AsyncGenerator<Uint8Array> {
+  try {
+    yield* source;
+  } catch {
+    throw new InvalidRecordingError("Upload interrupted");
+  }
+}
 export type RecordingStatus = "pending" | "saved" | "failed" | "deleted";
+
 export type RecordingMetadata = {
   status: RecordingStatus;
   browserId: string | null;
@@ -35,23 +44,21 @@ export class RecordingStore {
     );
     return (result.rows[0] as RecordingMetadata | undefined) ?? this.get(id);
   }
-  async save(
-    id: string,
-    video: Buffer,
-  ): Promise<RecordingMetadata | undefined> {
-    const result = await this.pool.query(
-      `UPDATE run_recordings SET status='saved',video=$2,updated_at=now() WHERE run_id=$1 AND status='pending' RETURNING ${columns}`,
-      [id, video],
-    );
-    return (result.rows[0] as RecordingMetadata | undefined) ?? this.get(id);
-  }
   async upload(
     id: string,
     source: AsyncIterable<Uint8Array>,
     assertCurrent: () => void,
+    interrupt: () => void,
   ): Promise<RecordingMetadata | undefined> {
     const client = await this.pool.connect();
     let broken = false;
+    let failure: Error | undefined;
+    const onError = (error: Error) => {
+      broken = true;
+      failure = error;
+      interrupt();
+    };
+    client.on("error", onError);
     try {
       assertCurrent();
       await client.query("BEGIN");
@@ -81,7 +88,7 @@ export class RecordingStore {
         block = Buffer.allocUnsafe(chunkBytes);
         used = 0;
       };
-      for await (const value of source) {
+      for await (const value of recordingBody(source)) {
         assertCurrent();
         const data = Buffer.from(
           value.buffer,
@@ -124,8 +131,9 @@ export class RecordingStore {
       return (saved.rows[0] as RecordingMetadata | undefined) ?? this.get(id);
     } catch (error) {
       await client.query("ROLLBACK").catch(() => (broken = true));
-      throw error;
+      throw failure ?? error;
     } finally {
+      client.off("error", onError);
       client.release(broken);
     }
   }
@@ -171,26 +179,27 @@ export class RecordingStore {
       bytes -= count;
     }
   }
-  async read(
-    id: string,
-    offset: number,
-    bytes: number,
-  ): Promise<Buffer | undefined> {
-    const result = await this.pool.query(
-      "SELECT substring(video FROM $2::integer FOR $3::integer) AS video FROM run_recordings WHERE run_id=$1 AND status='saved'",
-      [id, offset + 1, bytes],
-    );
-    return result.rows[0]?.video as Buffer | undefined;
-  }
   async delete(id: string): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO run_recordings (run_id,status) SELECT id,'deleted' FROM backend_runs WHERE id=$1 ON CONFLICT (run_id) DO UPDATE SET status='deleted',video=NULL,updated_at=now()`,
-      [id],
-    );
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO run_recordings (run_id,status) SELECT id,'deleted' FROM backend_runs WHERE id=$1 ON CONFLICT (run_id) DO UPDATE SET status='deleted',video=NULL,byte_count=NULL,upload_id=NULL,updated_at=now()`,
+        [id],
+      );
+      await client.query("DELETE FROM recording_chunks WHERE run_id=$1", [id]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
+
   async expire(): Promise<void> {
     await this.pool.query(
-      `UPDATE run_recordings SET status='deleted',video=NULL,updated_at=now() WHERE status='saved' AND updated_at <= now()-interval '30 days'`,
+      `WITH expired AS (UPDATE run_recordings SET status='deleted',video=NULL,byte_count=NULL,upload_id=NULL,updated_at=now() WHERE status='saved' AND updated_at <= now()-interval '30 days' RETURNING run_id) DELETE FROM recording_chunks WHERE run_id IN (SELECT run_id FROM expired)`,
     );
     await this.pool.query(
       "UPDATE run_recordings r SET status='failed',updated_at=now() FROM backend_runs b WHERE r.run_id=b.id AND r.status='pending' AND ((b.status IN ('completed','failed','cancelled','interrupted','outcome_unknown') AND b.updated_at < now()-interval '120 seconds') OR b.created_at + (b.timeout_ms+180000)*interval '1 millisecond' < now())",

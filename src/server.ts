@@ -141,7 +141,16 @@ const server = createServer((request, response) => {
         return send(response, 401, { error: "Unauthorized" });
     }
 
-    if (await recordingUpload(request, response, recordings, assertCurrent))
+    if (
+      await recordingUpload(
+        request,
+        response,
+        recordings,
+        assertCurrent,
+        signal,
+      )
+    )
+
       return;
 
     const internalEvents =
