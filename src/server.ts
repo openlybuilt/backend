@@ -16,6 +16,7 @@ import { WorkflowStore } from "./workflows/store.js";
 import { parseDefinition, resolveWorkflow } from "./workflows/definition.js";
 import { IdentityClient } from "./identity/client.js";
 import { WorkspaceStore } from "./workspaces/store.js";
+import { PlaceholderStore } from "./placeholders/store.js";
 
 const rawPort = process.env.PORT ?? "3000";
 if (!/^\d+$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535)
@@ -38,6 +39,10 @@ const store = new RunStore(process.env.DATABASE_URL);
 await store.initialize();
 const workflows = new WorkflowStore(store.pool);
 const workspaces = new WorkspaceStore(store.pool);
+const placeholders = new PlaceholderStore(
+  store.pool,
+  process.env.PLACEHOLDER_ENCRYPTION_KEY ?? "",
+);
 const events = new EventStore(store.pool);
 const recordings = new RecordingStore(store.pool);
 const runs = new RunService(
@@ -176,6 +181,44 @@ const server = createServer((request, response) => {
     }
     if (!identity) return send(response, 401, { error: "Unauthorized" });
     const workspaceId = await workspaces.getOrCreate(identity);
+    if (request.method === "GET" && request.url === "/placeholders")
+      return send(response, 200, await placeholders.list(workspaceId));
+    if (request.method === "POST" && request.url === "/placeholders") {
+      if (
+        !/^application\/json(?:\s*;|$)/i.test(
+          request.headers["content-type"] ?? "",
+        )
+      )
+        return send(response, 415, { error: "JSON content type required" });
+      try {
+        return send(
+          response,
+          200,
+          await placeholders.save(workspaceId, await readJson(request)),
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          [
+            "Invalid placeholder",
+            "Invalid JSON",
+            "Request body too large",
+          ].includes(error.message)
+        )
+          return send(
+            response,
+            error.message === "Request body too large" ? 413 : 400,
+            { error: error.message },
+          );
+        throw error;
+      }
+    }
+    const placeholderMatch =
+      /^\/placeholders\/([A-Za-z][A-Za-z0-9_]{0,49})$/.exec(request.url ?? "");
+    if (request.method === "DELETE" && placeholderMatch)
+      return (await placeholders.delete(workspaceId, placeholderMatch[1]!))
+        ? send(response, 200, { deleted: true })
+        : send(response, 404, { error: "Placeholder not found" });
     const recordingMatch =
       /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/recording$/i.exec(
         request.url ?? "",
