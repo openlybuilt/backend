@@ -1,6 +1,7 @@
 export type WorkflowStep =
   | { type: "navigate"; url: string }
-  | { type: "type"; text: string }
+  | { type: "type"; text: string; target?: string; region?: string }
+  | { type: "wait"; seconds: number }
   | { type: "press_keys"; keys: string[] }
   | { type: "click"; x: number; y: number }
   | { type: "click"; target: string }
@@ -39,11 +40,33 @@ export function parseWorkflow(input: unknown): ResolvedWorkflow {
     }
     if (
       step.type === "type" &&
-      exact("type", "text") &&
       typeof step.text === "string" &&
-      step.text.length <= 10000
+      step.text.length <= 10000 &&
+      (exact("type", "text") ||
+        (typeof step.target === "string" &&
+          step.target.trim().length > 0 &&
+          step.target.length <= 1000 &&
+          (exact("type", "text", "target") ||
+            (exact("type", "text", "target", "region") &&
+              typeof step.region === "string" &&
+              step.region.trim().length > 0 &&
+              step.region.length <= 200))))
     )
-      return { type: "type", text: step.text };
+      return {
+        type: "type",
+        text: step.text,
+        ...(typeof step.target === "string" ? { target: step.target } : {}),
+        ...(typeof step.region === "string" ? { region: step.region } : {}),
+      };
+    if (
+      step.type === "wait" &&
+      exact("type", "seconds") &&
+      typeof step.seconds === "number" &&
+      Number.isFinite(step.seconds) &&
+      step.seconds > 0 &&
+      step.seconds <= 600
+    )
+      return { type: "wait", seconds: step.seconds };
     if (
       step.type === "ai" &&
       exact("type", "instruction") &&
@@ -127,7 +150,12 @@ export function resolveWorkflow(
       if (step.type === "navigate")
         return { ...step, url: replace(step.url, strings) };
       if (step.type === "type")
-        return { ...step, text: replace(step.text, strings) };
+        return {
+          ...step,
+          text: replace(step.text, strings),
+          ...(step.target ? { target: replace(step.target, strings) } : {}),
+          ...(step.region ? { region: replace(step.region, strings) } : {}),
+        };
       if (step.type === "ai")
         return { ...step, instruction: replace(step.instruction, strings) };
       if (step.type === "click" && "target" in step)
@@ -169,7 +197,7 @@ export function parseDefinition(input: unknown): WorkflowDefinition {
   );
   const sample = (value.steps as Array<Record<string, unknown>>).map((step) => {
     const copy = { ...step };
-    for (const key of ["url", "text", "instruction", "target"]) {
+    for (const key of ["url", "text", "instruction", "target", "region"]) {
       if (typeof copy[key] === "string") {
         const original = copy[key] as string;
         copy[key] =

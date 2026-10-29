@@ -37,7 +37,7 @@ export function parseUpdate(value: unknown): RunUpdate {
         typeof step !== "object" ||
         Array.isArray(step) ||
         step.index !== index ||
-        !["navigate", "type", "press_keys", "click", "ai"].includes(
+        !["navigate", "type", "wait", "press_keys", "click", "ai"].includes(
           step.type,
         ) ||
         !["running", "completed", "failed", "cancelled"].includes(

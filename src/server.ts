@@ -202,6 +202,18 @@ const server = createServer((request, response) => {
             timeoutMs: body.timeoutMs,
           });
           resolved = resolveWorkflow(version.definition, body.inputs);
+          if (body.timeoutMs === undefined)
+            input.timeoutMs = Math.min(
+              600000,
+              input.timeoutMs +
+                Math.ceil(
+                  resolved.steps.reduce(
+                    (total, step) =>
+                      total + (step.type === "wait" ? step.seconds * 1000 : 0),
+                    0,
+                  ),
+                ),
+            );
         } catch (error) {
           return send(response, 400, {
             error:
