@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
+import { defaultWorkflow } from "../workflows/default-workflow.js";
 
 export type VerifiedIdentity = { issuer: string; subject: string };
 
@@ -15,11 +16,29 @@ export class WorkspaceStore {
         [randomUUID(), identity.issuer, identity.subject],
       );
       const workspace = await client.query<{ id: string }>(
-        "INSERT INTO workspaces (id,identity_id) VALUES ($1,$2) ON CONFLICT (identity_id) DO UPDATE SET identity_id=EXCLUDED.identity_id RETURNING id",
+        "INSERT INTO workspaces (id,identity_id) VALUES ($1,$2) ON CONFLICT (identity_id) DO NOTHING RETURNING id",
         [randomUUID(), person.rows[0]!.id],
       );
+      let workspaceId = workspace.rows[0]?.id;
+      if (workspaceId) {
+        const workflowId = randomUUID();
+        await client.query(
+          "INSERT INTO workflows (id,workspace_id) VALUES ($1,$2)",
+          [workflowId, workspaceId],
+        );
+        await client.query(
+          "INSERT INTO workflow_versions (workflow_id,version,definition) VALUES ($1,1,$2::jsonb)",
+          [workflowId, JSON.stringify(defaultWorkflow)],
+        );
+      } else {
+        const existing = await client.query<{ id: string }>(
+          "SELECT id FROM workspaces WHERE identity_id=$1",
+          [person.rows[0]!.id],
+        );
+        workspaceId = existing.rows[0]!.id;
+      }
       await client.query("COMMIT");
-      return workspace.rows[0]!.id;
+      return workspaceId;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
