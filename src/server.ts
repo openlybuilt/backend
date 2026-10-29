@@ -197,6 +197,23 @@ const server = createServer((request, response) => {
       });
     }
     if (request.method === "DELETE" && request.url === "/account") {
+      let verified;
+      try {
+        verified = await identityClient.verifyDeletion(authorization[1]!);
+      } catch {
+        return send(response, 503, {
+          error: "Account verification unavailable",
+        });
+      }
+      if (
+        !verified ||
+        verified.issuer !== identity.issuer ||
+        verified.subject !== identity.subject
+      )
+        return send(response, 403, {
+          code: "reauthentication_required",
+          error: "Recent verification required",
+        });
       try {
         await accountGate.block(identity);
       } catch {

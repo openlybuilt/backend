@@ -41,8 +41,20 @@ export class IdentityClient {
     if (!response.ok) throw new Error("Identity deletion unavailable");
   }
 
+  async verifyDeletion(token: string): Promise<VerifiedIdentity | undefined> {
+    return this.verifyRequest(token, "/verify-deletion", true);
+  }
+
   async verify(token: string): Promise<VerifiedIdentity | undefined> {
-    const response = await fetch(this.endpoint, {
+    return this.verifyRequest(token, "/verify", false);
+  }
+
+  private async verifyRequest(
+    token: string,
+    path: string,
+    deletion: boolean,
+  ): Promise<VerifiedIdentity | undefined> {
+    const response = await fetch(new URL(path, this.endpoint), {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.serviceToken}`,
@@ -52,7 +64,7 @@ export class IdentityClient {
       signal: AbortSignal.timeout(5000),
       redirect: "error",
     });
-    if (response.status === 401) {
+    if (response.status === 401 || (deletion && response.status === 403)) {
       await response.body?.cancel();
       return undefined;
     }
