@@ -75,6 +75,12 @@ export class RunStore {
       ),
     );
     await this.pool.query(
+      await readFile(
+        new URL("../../migrations/005_run_events.sql", import.meta.url),
+        "utf8",
+      ),
+    );
+    await this.pool.query(
       "UPDATE backend_runs SET status = 'dispatch_unknown', updated_at = now() WHERE status = 'dispatch_pending'",
     );
   }
