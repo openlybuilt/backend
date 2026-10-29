@@ -2,9 +2,6 @@ import type { RunRequest } from "./contracts.js";
 export type AgentRun = {
   id: string;
   status: string;
-  result: unknown;
-  steps?: unknown;
-  liveViewUrl?: string;
 };
 export class AgentsClient {
   constructor(

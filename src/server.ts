@@ -29,6 +29,7 @@ const runs = new RunService(
     process.env.AGENTS_API_TOKEN ?? "",
   ),
 );
+runs.start();
 function send(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "content-type": "application/json" });
   response.end(JSON.stringify(value));
@@ -74,10 +75,16 @@ const server = createServer((request, response) => {
           error: error instanceof Error ? error.message : "Invalid run update",
         });
       }
-      const record = await runs.report(updateMatch[1]!.toLowerCase(), update);
-      return record
-        ? send(response, 200, record)
-        : send(response, 404, { error: "Run not found" });
+      try {
+        const record = await runs.report(updateMatch[1]!.toLowerCase(), update);
+        return record
+          ? send(response, 200, record)
+          : send(response, 404, { error: "Run not found" });
+      } catch (error) {
+        if (error instanceof Error && error.message === "Run already finished")
+          return send(response, 409, { error: error.message });
+        throw error;
+      }
     }
     const authorization = request.headers.authorization ?? "";
     const provided = Buffer.from(authorization);
@@ -254,7 +261,7 @@ const server = createServer((request, response) => {
         request.url ?? "",
       );
     if (match && request.method === "GET" && !match[2]) {
-      const record = await runs.reconcile(match[1]!.toLowerCase());
+      const record = await store.get(match[1]!.toLowerCase());
       return record
         ? send(response, 200, record)
         : send(response, 404, { error: "Run not found" });
@@ -278,8 +285,11 @@ server.listen(Number(rawPort), "127.0.0.1", () =>
 for (const signal of ["SIGINT", "SIGTERM"] as const)
   process.once(signal, () => {
     server.close(() => {
-      void store.close().catch(() => {
-        process.exitCode = 1;
-      });
+      void runs
+        .stop()
+        .then(() => store.close())
+        .catch(() => {
+          process.exitCode = 1;
+        });
     });
   });
