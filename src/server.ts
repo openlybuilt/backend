@@ -55,7 +55,10 @@ const runs = new RunService(
 );
 runs.start();
 function send(response: ServerResponse, status: number, value: unknown): void {
-  response.writeHead(status, { "content-type": "application/json" });
+  response.writeHead(status, {
+    "content-type": "application/json",
+    "cache-control": "no-store",
+  });
   response.end(JSON.stringify(value));
 }
 async function readJson(
@@ -203,11 +206,16 @@ const server = createServer((request, response) => {
             "Invalid placeholder",
             "Invalid JSON",
             "Request body too large",
+            "Placeholder already exists",
           ].includes(error.message)
         )
           return send(
             response,
-            error.message === "Request body too large" ? 413 : 400,
+            error.message === "Request body too large"
+              ? 413
+              : error.message === "Placeholder already exists"
+                ? 409
+                : 400,
             { error: error.message },
           );
         throw error;
@@ -377,9 +385,14 @@ const server = createServer((request, response) => {
         if (
           Object.keys(body).some(
             (key) =>
-              !["id", "version", "inputs", "maxSteps", "timeoutMs"].includes(
-                key,
-              ),
+              ![
+                "id",
+                "version",
+                "inputs",
+                "maxSteps",
+                "timeoutMs",
+                "acknowledgeSecretExposure",
+              ].includes(key),
           ) ||
           typeof body.version !== "number" ||
           !Number.isInteger(body.version) ||
@@ -394,6 +407,37 @@ const server = createServer((request, response) => {
         );
         if (!version)
           return send(response, 404, { error: "Workflow version not found" });
+        if (
+          body.inputs !== undefined &&
+          (!body.inputs ||
+            typeof body.inputs !== "object" ||
+            Array.isArray(body.inputs) ||
+            Object.keys(body.inputs).length !== 0)
+        )
+          return send(response, 400, {
+            error: "Save placeholder values before running",
+          });
+        if (
+          body.acknowledgeSecretExposure !== undefined &&
+          typeof body.acknowledgeSecretExposure !== "boolean"
+        )
+          return send(response, 400, { error: "Invalid acknowledgment" });
+        const resolvedInputs = await placeholders.resolve(
+          workspaceId,
+          version.definition.inputs,
+        );
+        if (resolvedInputs.missing.length)
+          return send(response, 400, {
+            error: "Missing placeholder values",
+            missing: resolvedInputs.missing,
+          });
+        if (
+          resolvedInputs.secretNames.length &&
+          body.acknowledgeSecretExposure !== true
+        )
+          return send(response, 400, {
+            error: "Secret exposure acknowledgment required",
+          });
         let input;
         let resolved;
         try {
@@ -403,7 +447,7 @@ const server = createServer((request, response) => {
             maxSteps: body.maxSteps,
             timeoutMs: body.timeoutMs,
           });
-          resolved = resolveWorkflow(version.definition, body.inputs);
+          resolved = resolveWorkflow(version.definition, resolvedInputs.values);
           if (body.timeoutMs === undefined)
             input.timeoutMs = Math.min(
               600000,
@@ -418,8 +462,11 @@ const server = createServer((request, response) => {
             );
         } catch (error) {
           return send(response, 400, {
-            error:
-              error instanceof Error ? error.message : "Invalid workflow run",
+            error: resolvedInputs.secretNames.length
+              ? "Workflow contains an invalid placeholder value"
+              : error instanceof Error
+                ? error.message
+                : "Invalid workflow run",
           });
         }
         try {
@@ -432,7 +479,14 @@ const server = createServer((request, response) => {
               workflow: resolved,
               workflowId,
               workflowVersion: body.version,
-              workflowInputs: body.inputs as Record<string, string>,
+              containsSecrets: resolvedInputs.secretNames.length > 0,
+              requestFingerprint: placeholders.fingerprint({
+                workspaceId,
+                workflowId,
+                version: body.version,
+                input,
+                resolved,
+              }),
             }),
           );
         } catch (error) {
