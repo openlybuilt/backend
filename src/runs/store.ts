@@ -91,8 +91,9 @@ export class RunStore {
     );
   }
   async create(request: RunRequest): Promise<BackendRun> {
+    if (!request.workspaceId) throw new Error("Workspace is required");
     await this.pool.query(
-      "INSERT INTO backend_runs (id, instruction, max_steps, timeout_ms, status,workflow,workflow_id,workflow_version,workflow_inputs) VALUES ($1,$2,$3,$4,'dispatch_pending',$5::jsonb,$6::uuid,$7::integer,$8::jsonb) ON CONFLICT (id) DO NOTHING",
+      "INSERT INTO backend_runs (id, instruction, max_steps, timeout_ms, status,workflow,workflow_id,workflow_version,workflow_inputs,workspace_id) VALUES ($1,$2,$3,$4,'dispatch_pending',$5::jsonb,$6::uuid,$7::integer,$8::jsonb,$9::uuid) ON CONFLICT (id) DO NOTHING",
       [
         request.id,
         request.instruction,
@@ -102,11 +103,13 @@ export class RunStore {
         request.workflowId ?? null,
         request.workflowVersion ?? null,
         request.workflowInputs ? JSON.stringify(request.workflowInputs) : null,
+        request.workspaceId,
       ],
     );
     const record = await this.get(request.id);
     if (!record) throw new Error("Run insert failed");
     if (
+      record.workspaceId !== request.workspaceId ||
       record.instruction !== request.instruction ||
       record.maxSteps !== request.maxSteps ||
       record.timeoutMs !== request.timeoutMs ||
@@ -123,24 +126,35 @@ export class RunStore {
   }
   async get(id: string): Promise<BackendRun | undefined> {
     const result = await this.pool.query(
-      `SELECT id, instruction, max_steps AS "maxSteps", timeout_ms AS "timeoutMs", status, cancel_requested AS "cancelRequested", result, workflow, workflow_id AS "workflowId", workflow_version AS "workflowVersion", workflow_inputs AS "workflowInputs", steps, live_view_url AS "liveViewUrl", created_at AS "createdAt", updated_at AS "updatedAt", COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE id=$1`,
+      `SELECT id, instruction, max_steps AS "maxSteps", timeout_ms AS "timeoutMs", status, cancel_requested AS "cancelRequested", result, workflow, workflow_id AS "workflowId", workflow_version AS "workflowVersion", workflow_inputs AS "workflowInputs", workspace_id AS "workspaceId", steps, live_view_url AS "liveViewUrl", created_at AS "createdAt", updated_at AS "updatedAt", COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE id=$1`,
       [id],
     );
     const record = result.rows[0] as BackendRun | undefined;
     return record ? withRecordingStatus(record) : undefined;
   }
-  async listRecent(): Promise<RecentWorkflowRun[]> {
+  async getForWorkspace(
+    id: string,
+    workspaceId: string,
+  ): Promise<BackendRun | undefined> {
+    const record = await this.get(id);
+    return record?.workspaceId === workspaceId ? record : undefined;
+  }
+  async listRecent(workspaceId: string): Promise<RecentWorkflowRun[]> {
     const result = await this.pool.query(
-      `SELECT r.id,r.status,r.result,r.steps,r.workflow_id AS "workflowId",r.workflow_version AS "workflowVersion",r.created_at AS "createdAt",r.updated_at AS "updatedAt",v.definition->>'name' AS "workflowName",COALESCE((SELECT status FROM run_recordings WHERE run_id=r.id),'unavailable') AS "recordingStatus" FROM backend_runs r JOIN workflow_versions v ON v.workflow_id=r.workflow_id AND v.version=r.workflow_version ORDER BY r.created_at DESC,r.id DESC LIMIT 100`,
+      `SELECT r.id,r.status,r.result,r.steps,r.workflow_id AS "workflowId",r.workflow_version AS "workflowVersion",r.created_at AS "createdAt",r.updated_at AS "updatedAt",v.definition->>'name' AS "workflowName",COALESCE((SELECT status FROM run_recordings WHERE run_id=r.id),'unavailable') AS "recordingStatus" FROM backend_runs r JOIN workflow_versions v ON v.workflow_id=r.workflow_id AND v.version=r.workflow_version WHERE r.workspace_id=$1 ORDER BY r.created_at DESC,r.id DESC LIMIT 100`,
+      [workspaceId],
     );
     return result.rows.map((record: RecentWorkflowRun) =>
       withRecordingStatus(record),
     );
   }
-  async listForWorkflow(workflowId: string): Promise<WorkflowRun[]> {
+  async listForWorkflow(
+    workflowId: string,
+    workspaceId: string,
+  ): Promise<WorkflowRun[]> {
     const result = await this.pool.query(
-      `SELECT id,status,result,steps,workflow_id AS "workflowId",workflow_version AS "workflowVersion",created_at AS "createdAt",updated_at AS "updatedAt",COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE workflow_id=$1 ORDER BY created_at DESC,id DESC LIMIT 100`,
-      [workflowId],
+      `SELECT id,status,result,steps,workflow_id AS "workflowId",workflow_version AS "workflowVersion",created_at AS "createdAt",updated_at AS "updatedAt",COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY created_at DESC,id DESC LIMIT 100`,
+      [workflowId, workspaceId],
     );
     return result.rows.map((record: WorkflowRun) =>
       withRecordingStatus(record),

@@ -8,6 +8,7 @@ export type RunRequest = {
   workflowId?: string;
   workflowVersion?: number;
   workflowInputs?: Record<string, string>;
+  workspaceId?: string;
 };
 export type RunRecord = RunRequest & {
   status: string;
