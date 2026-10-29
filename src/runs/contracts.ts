@@ -1,4 +1,7 @@
-import type { ResolvedWorkflow } from "../workflows/definition.js";
+import type {
+  ExecutionTarget,
+  ResolvedWorkflow,
+} from "../workflows/definition.js";
 export type RunRequest = {
   id: string;
   instruction: string;
@@ -14,6 +17,7 @@ export type RunRequest = {
   recordingEnabled?: boolean;
 };
 export type RunRecord = RunRequest & {
+  executionTarget: ExecutionTarget;
   status: string;
   result: unknown;
   createdAt: string;

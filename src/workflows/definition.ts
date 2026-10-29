@@ -1,3 +1,4 @@
+export type ExecutionTarget = "browser" | "windows";
 export type WorkflowStep =
   | { type: "navigate"; url: string }
   | { type: "type"; text: string; target?: string; region?: string }
@@ -7,18 +8,31 @@ export type WorkflowStep =
       direction: "up" | "down" | "left" | "right";
       pixels: number;
     }
+  | { type: "scroll"; direction: "up" | "down"; wheelTicks: number }
   | { type: "press_keys"; keys: string[] }
   | { type: "click"; x: number; y: number }
   | { type: "click"; target: string }
   | { type: "ai"; instruction: string };
-export type ResolvedWorkflow = { steps: WorkflowStep[] };
+export type ResolvedWorkflow = {
+  executionTarget: ExecutionTarget;
+  steps: WorkflowStep[];
+};
+
+function parseExecutionTarget(value: unknown): ExecutionTarget {
+  if (value === undefined) return "browser";
+  if (value === "browser" || value === "windows") return value;
+  throw new Error("Invalid execution target");
+}
 
 export function parseWorkflow(input: unknown): ResolvedWorkflow {
   if (!input || typeof input !== "object" || Array.isArray(input))
     throw new Error("Invalid workflow");
   const value = input as Record<string, unknown>;
+  const executionTarget = parseExecutionTarget(value.executionTarget);
   if (
-    Object.keys(value).length !== 1 ||
+    Object.keys(value).some(
+      (key) => !["steps", "executionTarget"].includes(key),
+    ) ||
     !Array.isArray(value.steps) ||
     value.steps.length < 1 ||
     value.steps.length > 30
@@ -72,19 +86,44 @@ export function parseWorkflow(input: unknown): ResolvedWorkflow {
       step.seconds <= 600
     )
       return { type: "wait", seconds: step.seconds };
-    if (
-      step.type === "scroll" &&
-      exact("type", "direction", "pixels") &&
-      (step.direction === "up" ||
-        step.direction === "down" ||
-        step.direction === "left" ||
-        step.direction === "right") &&
-      typeof step.pixels === "number" &&
-      Number.isInteger(step.pixels) &&
-      step.pixels >= 1 &&
-      step.pixels <= 100000
-    )
-      return { type: "scroll", direction: step.direction, pixels: step.pixels };
+    if (step.type === "scroll") {
+      if (
+        executionTarget === "windows" &&
+        exact("type", "direction", "wheelTicks") &&
+        (step.direction === "up" || step.direction === "down") &&
+        typeof step.wheelTicks === "number" &&
+        Number.isInteger(step.wheelTicks) &&
+        step.wheelTicks >= 1 &&
+        step.wheelTicks <= 100
+      )
+        return {
+          type: "scroll",
+          direction: step.direction,
+          wheelTicks: step.wheelTicks,
+        };
+      if (
+        executionTarget === "browser" &&
+        exact("type", "direction", "pixels") &&
+        (step.direction === "up" ||
+          step.direction === "down" ||
+          step.direction === "left" ||
+          step.direction === "right") &&
+        typeof step.pixels === "number" &&
+        Number.isInteger(step.pixels) &&
+        step.pixels >= 1 &&
+        step.pixels <= 100000
+      )
+        return {
+          type: "scroll",
+          direction: step.direction,
+          pixels: step.pixels,
+        };
+      throw new Error(
+        executionTarget === "windows"
+          ? "Windows scrolling requires up or down and 1 to 100 wheel ticks"
+          : "Browser scrolling requires a direction and 1 to 100000 pixels",
+      );
+    }
     if (
       step.type === "ai" &&
       exact("type", "instruction") &&
@@ -127,10 +166,11 @@ export function parseWorkflow(input: unknown): ResolvedWorkflow {
       return { type: "click", x: step.x, y: step.y };
     throw new Error("Invalid workflow step");
   });
-  return { steps };
+  return { executionTarget, steps };
 }
 
 export type WorkflowDefinition = {
+  executionTarget?: ExecutionTarget;
   name: string;
   description: string;
   inputs: string[];
@@ -164,6 +204,7 @@ export function resolveWorkflow(
     throw new Error("Inputs do not match the workflow");
   const strings = values as Record<string, string>;
   return parseWorkflow({
+    executionTarget: definition.executionTarget,
     steps: definition.steps.map((step) => {
       if (step.type === "navigate")
         return { ...step, url: replace(step.url, strings) };
@@ -188,9 +229,13 @@ export function parseDefinition(input: unknown): WorkflowDefinition {
   if (!input || typeof input !== "object" || Array.isArray(input))
     throw new Error("Invalid workflow definition");
   const value = input as Record<string, unknown>;
+  const executionTarget = parseExecutionTarget(value.executionTarget);
   if (
     Object.keys(value).some(
-      (key) => !["name", "description", "inputs", "steps"].includes(key),
+      (key) =>
+        !["name", "description", "inputs", "steps", "executionTarget"].includes(
+          key,
+        ),
     ) ||
     typeof value.name !== "string" ||
     (value.description !== undefined &&
@@ -232,8 +277,9 @@ export function parseDefinition(input: unknown): WorkflowDefinition {
       );
     return copy;
   });
-  if (sample.length > 0) parseWorkflow({ steps: sample });
+  if (sample.length > 0) parseWorkflow({ executionTarget, steps: sample });
   return {
+    ...(value.executionTarget === undefined ? {} : { executionTarget }),
     name: value.name.trim(),
     description: (value.description as string | undefined) ?? "",
     inputs,
