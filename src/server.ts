@@ -148,6 +148,16 @@ const server = createServer((request, response) => {
       return send(response, 401, { error: "Unauthorized" });
     }
     if (await recordingPlayback(request, response, recordings)) return;
+    const eventsMatch =
+      /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/events$/i.exec(
+        request.url ?? "",
+      );
+    if (request.method === "GET" && eventsMatch) {
+      const saved = await events.list(eventsMatch[1]!.toLowerCase());
+      return saved
+        ? send(response, 200, saved)
+        : send(response, 404, { error: "Run not found" });
+    }
     if (request.method === "GET" && request.url === "/runs")
       return send(response, 200, await store.listRecent());
     if (request.method === "GET" && request.url === "/workflows")

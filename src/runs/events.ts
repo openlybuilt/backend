@@ -113,6 +113,18 @@ export function parseEventBatch(value: unknown): RunEvent[] {
 
 export class EventStore {
   constructor(private readonly pool: pg.Pool) {}
+  async list(id: string): Promise<RunEvent[] | undefined> {
+    const run = await this.pool.query(
+      "SELECT id FROM backend_runs WHERE id=$1",
+      [id],
+    );
+    if (!run.rowCount) return undefined;
+    const result = await this.pool.query(
+      "SELECT event FROM run_events WHERE run_id=$1 ORDER BY sequence LIMIT 10000",
+      [id],
+    );
+    return result.rows.map((row: { event: RunEvent }) => row.event);
+  }
   async append(
     id: string,
     events: RunEvent[],
