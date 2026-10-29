@@ -1,14 +1,21 @@
+import type { ResolvedWorkflow } from "../workflows/definition.js";
 export type RunRequest = {
   id: string;
   instruction: string;
   maxSteps: number;
   timeoutMs: number;
+  workflow?: ResolvedWorkflow;
+  workflowId?: string;
+  workflowVersion?: number;
+  workflowInputs?: Record<string, string>;
 };
 export type RunRecord = RunRequest & {
   status: string;
   result: unknown;
   createdAt: string;
   updatedAt: string;
+  steps?: unknown;
+  liveViewUrl?: string | null;
 };
 export function parseRun(value: unknown): RunRequest {
   if (!value || typeof value !== "object" || Array.isArray(value))
