@@ -4,6 +4,8 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { RecordingStore } from "./recordings/store.js";
+import { recordingPlayback, recordingUpload } from "./recordings/routes.js";
 import { AgentsClient } from "./runs/agents-client.js";
 import { parseRun } from "./runs/contracts.js";
 import { parseUpdate } from "./runs/updates.js";
@@ -22,12 +24,14 @@ if (!/^[A-Za-z0-9_-]{32,256}$/.test(apiToken))
 const store = new RunStore(process.env.DATABASE_URL);
 await store.initialize();
 const workflows = new WorkflowStore(store.pool);
+const recordings = new RecordingStore(store.pool);
 const runs = new RunService(
   store,
   new AgentsClient(
     process.env.AGENTS_URL ?? "http://127.0.0.1:3100",
     process.env.AGENTS_API_TOKEN ?? "",
   ),
+  recordings,
 );
 runs.start();
 function send(response: ServerResponse, status: number, value: unknown): void {
@@ -56,6 +60,7 @@ const server = createServer((request, response) => {
   void (async () => {
     if (request.method === "GET" && request.url === "/health")
       return send(response, 200, { status: "ok" });
+    if (await recordingUpload(request, response, recordings)) return;
     const updateMatch =
       /^\/internal\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/update$/i.exec(
         request.url ?? "",
@@ -96,6 +101,7 @@ const server = createServer((request, response) => {
     ) {
       return send(response, 401, { error: "Unauthorized" });
     }
+    if (await recordingPlayback(request, response, recordings)) return;
     if (request.method === "GET" && request.url === "/workflows")
       return send(response, 200, await workflows.list());
     if (request.method === "POST" && request.url === "/workflows") {
@@ -139,6 +145,11 @@ const server = createServer((request, response) => {
         return found
           ? send(response, 200, found)
           : send(response, 404, { error: "Workflow not found" });
+      }
+      if (request.method === "GET" && workflowMatch[2] === "runs") {
+        if (!(await workflows.get(workflowId)))
+          return send(response, 404, { error: "Workflow not found" });
+        return send(response, 200, await store.listForWorkflow(workflowId));
       }
       if (request.method === "POST" && workflowMatch[2] === "versions") {
         if (
