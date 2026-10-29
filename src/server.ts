@@ -4,6 +4,11 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import {
+  Database,
+  DatabaseUnavailableError,
+  isDatabaseFailure,
+} from "./database.js";
 import { RecordingStore } from "./recordings/store.js";
 import { RecordingPreferences } from "./recordings/preferences.js";
 import { recordingPlayback, recordingUpload } from "./recordings/routes.js";
@@ -37,8 +42,9 @@ if (callbackToken === process.env.AUTH_SERVICE_TOKEN)
   throw new Error(
     "Agent callback and identity service credentials must differ",
   );
-const store = new RunStore(process.env.DATABASE_URL);
-await store.initialize();
+const database = new Database(process.env.DATABASE_URL);
+const store = new RunStore(database.pool);
+
 const workflows = new WorkflowStore(store.pool);
 const workspaces = new WorkspaceStore(store.pool);
 const placeholders = new PlaceholderStore(
@@ -53,7 +59,7 @@ const agents = new AgentsClient(
   process.env.AGENTS_URL ?? "http://127.0.0.1:3100",
   process.env.AGENTS_API_TOKEN ?? "",
 );
-const runs = new RunService(store, agents, recordings);
+const runs = new RunService(store, agents, recordings, database);
 const accountGate = new AccountGate();
 const accountDeletion = new AccountDeletionService(
   store.pool,
@@ -61,6 +67,8 @@ const accountDeletion = new AccountDeletionService(
   identityClient,
 );
 accountDeletion.start();
+
+database.start(() => store.initialize());
 
 runs.start();
 function send(response: ServerResponse, status: number, value: unknown): void {
@@ -100,6 +108,11 @@ const server = createServer((request, response) => {
   void (async () => {
     if (request.method === "GET" && request.url === "/health")
       return send(response, 200, { status: "ok" });
+    if (request.method === "GET" && request.url === "/ready")
+      return send(response, database.ready ? 200 : 503, {
+        status: database.ready ? "ready" : "unavailable",
+      });
+    database.assertReady();
     if (/^\/internal\//i.test(request.url ?? "")) {
       const provided = Buffer.from(request.headers.authorization ?? "");
       const expected = Buffer.from(`Bearer ${callbackToken}`);
@@ -110,6 +123,7 @@ const server = createServer((request, response) => {
       )
         return send(response, 401, { error: "Unauthorized" });
     }
+
     if (await recordingUpload(request, response, recordings)) return;
     const internalEvents =
       /^\/internal\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/events$/i.exec(
@@ -667,25 +681,26 @@ const server = createServer((request, response) => {
     }
     send(response, 404, { error: "Not found" });
   })()
-    .catch(() => {
+    .catch((error: unknown) => {
+      if (isDatabaseFailure(error)) database.unavailable();
+      const unavailable = error instanceof DatabaseUnavailableError || !database.ready;
       if (!response.headersSent)
-        send(response, 500, { error: "Internal service error" });
+        send(response, unavailable ? 503 : 500, {
+          error: unavailable ? "Database is currently unavailable" : "Internal service error",
+        });
       else response.end();
     })
     .finally(() => releaseAccount?.());
+
 });
 server.listen(Number(rawPort), "127.0.0.1", () =>
   console.log(`Backend listening on 127.0.0.1:${rawPort}`),
 );
 for (const signal of ["SIGINT", "SIGTERM"] as const)
   process.once(signal, () => {
-    server.close(() => {
-      void runs
-        .stop()
-        .then(() => accountDeletion.stop())
-        .then(() => store.close())
-        .catch(() => {
-          process.exitCode = 1;
-        });
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+    void Promise.all([runs.stop(), accountDeletion.stop(), database.stop(), closed]).catch(() => {
+      process.exitCode = 1;
+
     });
   });

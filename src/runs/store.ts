@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { readFile } from "node:fs/promises";
-import pg from "pg";
+import type pg from "pg";
 import type { RunRecord, RunRequest } from "./contracts.js";
 
 export type BackendRun = RunRecord & {
@@ -49,23 +49,8 @@ function withRecordingStatus<T extends WorkflowRun>(record: T): T {
 }
 
 export class RunStore {
-  readonly pool: pg.Pool;
-  private readonly lock: pg.Client;
-  constructor(url: string) {
-    this.pool = new pg.Pool({ connectionString: url });
-    this.lock = new pg.Client({ connectionString: url });
-    this.lock.on("error", () => {
-      console.error("Database ownership connection lost");
-      process.exit(1);
-    });
-  }
+  constructor(readonly pool: pg.Pool) {}
   async initialize(): Promise<void> {
-    await this.lock.connect();
-    const lock = await this.lock.query(
-      "SELECT pg_try_advisory_lock(78422117) AS acquired",
-    );
-    if (!lock.rows[0].acquired)
-      throw new Error("Another backend service owns this database");
     const sql = await readFile(
       new URL("../../migrations/001_backend_runs.sql", import.meta.url),
       "utf8",
@@ -303,9 +288,5 @@ export class RunStore {
         liveViewUrl !== undefined,
       ],
     );
-  }
-  async close(): Promise<void> {
-    await this.pool.end();
-    await this.lock.end();
   }
 }
