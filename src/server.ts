@@ -6,6 +6,7 @@ import {
 } from "node:http";
 import { RecordingStore } from "./recordings/store.js";
 import { recordingPlayback, recordingUpload } from "./recordings/routes.js";
+import { EventStore, parseEventBatch } from "./runs/events.js";
 import { AgentsClient } from "./runs/agents-client.js";
 import { parseRun } from "./runs/contracts.js";
 import { parseUpdate } from "./runs/updates.js";
@@ -24,6 +25,7 @@ if (!/^[A-Za-z0-9_-]{32,256}$/.test(apiToken))
 const store = new RunStore(process.env.DATABASE_URL);
 await store.initialize();
 const workflows = new WorkflowStore(store.pool);
+const events = new EventStore(store.pool);
 const recordings = new RecordingStore(store.pool);
 const runs = new RunService(
   store,
@@ -42,12 +44,19 @@ async function readJson(
   request: IncomingMessage,
   limit = 32000,
 ): Promise<unknown> {
+  if (Number(request.headers["content-length"]) > limit) {
+    request.resume();
+    throw new Error("Request body too large");
+  }
   const chunks: Buffer[] = [];
   let bytes = 0;
-  for await (const chunk of request) {
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     const data = Buffer.from(chunk);
     bytes += data.length;
-    if (bytes > limit) throw new Error("Request body too large");
+    if (bytes > limit) {
+      request.resume();
+      throw new Error("Request body too large");
+    }
     chunks.push(data);
   }
   try {
@@ -61,6 +70,43 @@ const server = createServer((request, response) => {
     if (request.method === "GET" && request.url === "/health")
       return send(response, 200, { status: "ok" });
     if (await recordingUpload(request, response, recordings)) return;
+    const internalEvents =
+      /^\/internal\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/events$/i.exec(
+        request.url ?? "",
+      );
+    if (request.method === "POST" && internalEvents) {
+      if (
+        !/^application\/json(?:\s*;|$)/i.test(
+          request.headers["content-type"] ?? "",
+        )
+      )
+        return send(response, 415, { error: "JSON content type required" });
+      let batch;
+      try {
+        batch = parseEventBatch(await readJson(request, 32768));
+      } catch (error) {
+        request.resume();
+        const message =
+          error instanceof Error ? error.message : "Invalid event batch";
+        return send(
+          response,
+          message === "Request body too large" ? 413 : 400,
+          { error: message },
+        );
+      }
+      const outcome = await events.append(
+        internalEvents[1]!.toLowerCase(),
+        batch,
+      );
+      return outcome === "saved"
+        ? send(response, 200, { accepted: batch.length })
+        : send(response, outcome === "missing" ? 404 : 409, {
+            error:
+              outcome === "missing"
+                ? "Run not found"
+                : "Event sequence already has different data",
+          });
+    }
     const updateMatch =
       /^\/internal\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/update$/i.exec(
         request.url ?? "",
