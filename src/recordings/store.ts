@@ -55,13 +55,13 @@ export class RecordingStore {
   }
   async delete(id: string): Promise<void> {
     await this.pool.query(
-      `INSERT INTO run_recordings (run_id,status) SELECT id,'deleted' FROM backend_runs WHERE id=$1 ON CONFLICT (run_id) DO UPDATE SET status='deleted',video=NULL,browser_id=NULL,replay_id=NULL,updated_at=now()`,
+      `INSERT INTO run_recordings (run_id,status) SELECT id,'deleted' FROM backend_runs WHERE id=$1 ON CONFLICT (run_id) DO UPDATE SET status='deleted',video=NULL,updated_at=now()`,
       [id],
     );
   }
   async expire(): Promise<void> {
     await this.pool.query(
-      `UPDATE run_recordings SET status='deleted',video=NULL,browser_id=NULL,replay_id=NULL,updated_at=now() WHERE status='saved' AND updated_at <= now()-interval '30 days'`,
+      `UPDATE run_recordings SET status='deleted',video=NULL,updated_at=now() WHERE status='saved' AND updated_at <= now()-interval '30 days'`,
     );
     await this.pool.query(
       "UPDATE run_recordings r SET status='failed',updated_at=now() FROM backend_runs b WHERE r.run_id=b.id AND r.status='pending' AND ((b.status IN ('completed','failed','cancelled','interrupted','outcome_unknown') AND b.updated_at < now()-interval '120 seconds') OR b.created_at + (b.timeout_ms+180000)*interval '1 millisecond' < now())",
