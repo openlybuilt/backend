@@ -17,6 +17,7 @@ import { WorkflowStore } from "./workflows/store.js";
 import { parseDefinition, resolveWorkflow } from "./workflows/definition.js";
 import { IdentityClient } from "./identity/client.js";
 import { WorkspaceStore } from "./workspaces/store.js";
+import { AccountDeletionService, AccountGate } from "./accounts/deletion.js";
 import { PlaceholderStore } from "./placeholders/store.js";
 
 const rawPort = process.env.PORT ?? "3000";
@@ -47,14 +48,18 @@ const placeholders = new PlaceholderStore(
 const events = new EventStore(store.pool);
 const recordings = new RecordingStore(store.pool);
 const recordingPreferences = new RecordingPreferences(store.pool);
-const runs = new RunService(
-  store,
-  new AgentsClient(
-    process.env.AGENTS_URL ?? "http://127.0.0.1:3100",
-    process.env.AGENTS_API_TOKEN ?? "",
-  ),
-  recordings,
+const agents = new AgentsClient(
+  process.env.AGENTS_URL ?? "http://127.0.0.1:3100",
+  process.env.AGENTS_API_TOKEN ?? "",
 );
+const runs = new RunService(store, agents, recordings);
+const accountGate = new AccountGate();
+const accountDeletion = new AccountDeletionService(
+  store.pool,
+  agents,
+  identityClient,
+);
+accountDeletion.start();
 runs.start();
 function send(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, {
@@ -89,6 +94,7 @@ async function readJson(
   }
 }
 const server = createServer((request, response) => {
+  let releaseAccount: (() => void) | undefined;
   void (async () => {
     if (request.method === "GET" && request.url === "/health")
       return send(response, 200, { status: "ok" });
@@ -185,7 +191,47 @@ const server = createServer((request, response) => {
       });
     }
     if (!identity) return send(response, 401, { error: "Unauthorized" });
-    const workspaceId = await workspaces.getOrCreate(identity);
+    if (request.method === "GET" && request.url === "/account/deletion") {
+      return send(response, 200, {
+        status: (await accountDeletion.status(identity)) ?? "none",
+      });
+    }
+    if (request.method === "DELETE" && request.url === "/account") {
+      try {
+        await accountGate.block(identity);
+      } catch {
+        return send(response, 409, {
+          error: "Account deletion is being requested",
+        });
+      }
+      try {
+        const workspaceId = await workspaces.getOrCreate(identity);
+        await accountDeletion.queue(identity, workspaceId);
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === "Account deletion requested"
+        )
+          return send(response, 202, { status: "pending" });
+        accountGate.unblock(identity);
+        throw error;
+      }
+      return send(response, 202, { status: "pending" });
+    }
+    releaseAccount = accountGate.enter(identity);
+    if (!releaseAccount)
+      return send(response, 409, { error: "Account deletion requested" });
+    let workspaceId: string;
+    try {
+      workspaceId = await workspaces.getOrCreate(identity);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "Account deletion requested"
+      )
+        return send(response, 409, { error: error.message });
+      throw error;
+    }
     if (request.url === "/settings/recordings" && request.method === "GET")
       return send(response, 200, {
         enabled: await recordingPreferences.get(workspaceId),
@@ -274,10 +320,6 @@ const server = createServer((request, response) => {
       ))
     )
       return send(response, 404, { error: "Run not found" });
-    if (recordingMatch && request.method === "DELETE") {
-      await recordings.delete(recordingMatch[1]!.toLowerCase());
-      return send(response, 200, { deleted: true });
-    }
     if (await recordingPlayback(request, response, recordings)) return;
     const eventsMatch =
       /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/events$/i.exec(
@@ -431,7 +473,6 @@ const server = createServer((request, response) => {
                 "maxSteps",
                 "timeoutMs",
                 "acknowledgeSecretExposure",
-                "recordingEnabled",
               ].includes(key),
           ) ||
           typeof body.version !== "number" ||
@@ -486,7 +527,6 @@ const server = createServer((request, response) => {
             instruction: "Guided workflow",
             maxSteps: body.maxSteps,
             timeoutMs: body.timeoutMs,
-            recordingEnabled: body.recordingEnabled,
           });
           resolved = resolveWorkflow(version.definition, resolvedInputs.values);
           if (body.timeoutMs === undefined)
@@ -592,11 +632,13 @@ const server = createServer((request, response) => {
         : send(response, 404, { error: "Run not found" });
     }
     send(response, 404, { error: "Not found" });
-  })().catch(() => {
-    if (!response.headersSent)
-      send(response, 500, { error: "Internal service error" });
-    else response.end();
-  });
+  })()
+    .catch(() => {
+      if (!response.headersSent)
+        send(response, 500, { error: "Internal service error" });
+      else response.end();
+    })
+    .finally(() => releaseAccount?.());
 });
 server.listen(Number(rawPort), "127.0.0.1", () =>
   console.log(`Backend listening on 127.0.0.1:${rawPort}`),
@@ -606,6 +648,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
     server.close(() => {
       void runs
         .stop()
+        .then(() => accountDeletion.stop())
         .then(() => store.close())
         .catch(() => {
           process.exitCode = 1;

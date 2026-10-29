@@ -27,6 +27,20 @@ export class IdentityClient {
     this.endpoint = new URL("/verify", url);
   }
 
+  async deleteUser(subject: string): Promise<void> {
+    const response = await fetch(
+      new URL(`/internal/users/${encodeURIComponent(subject)}`, this.endpoint),
+      {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${this.serviceToken}` },
+        signal: AbortSignal.timeout(10000),
+        redirect: "error",
+      },
+    );
+    await response.body?.cancel();
+    if (!response.ok) throw new Error("Identity deletion unavailable");
+  }
+
   async verify(token: string): Promise<VerifiedIdentity | undefined> {
     const response = await fetch(this.endpoint, {
       method: "POST",
