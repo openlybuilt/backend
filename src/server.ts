@@ -14,17 +14,30 @@ import { RunService } from "./runs/service.js";
 import { RunStore } from "./runs/store.js";
 import { WorkflowStore } from "./workflows/store.js";
 import { parseDefinition, resolveWorkflow } from "./workflows/definition.js";
+import { IdentityClient } from "./identity/client.js";
+import { WorkspaceStore } from "./workspaces/store.js";
 
 const rawPort = process.env.PORT ?? "3000";
 if (!/^\d+$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535)
   throw new Error("PORT must be an integer between 1 and 65535");
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
-const apiToken = process.env.BACKEND_API_TOKEN ?? "";
-if (!/^[A-Za-z0-9_-]{32,256}$/.test(apiToken))
-  throw new Error("BACKEND_API_TOKEN must be 32 to 256 URL-safe characters");
+const identityClient = new IdentityClient(
+  process.env.AUTH_VERIFY_URL ?? "",
+  process.env.AUTH_SERVICE_TOKEN ?? "",
+);
+const callbackToken = process.env.AGENTS_CALLBACK_TOKEN ?? "";
+if (!/^[A-Za-z0-9_-]{32,256}$/.test(callbackToken))
+  throw new Error(
+    "AGENTS_CALLBACK_TOKEN must be 32 to 256 URL-safe characters",
+  );
+if (callbackToken === process.env.AUTH_SERVICE_TOKEN)
+  throw new Error(
+    "Agent callback and identity service credentials must differ",
+  );
 const store = new RunStore(process.env.DATABASE_URL);
 await store.initialize();
 const workflows = new WorkflowStore(store.pool);
+const workspaces = new WorkspaceStore(store.pool);
 const events = new EventStore(store.pool);
 const recordings = new RecordingStore(store.pool);
 const runs = new RunService(
@@ -69,6 +82,16 @@ const server = createServer((request, response) => {
   void (async () => {
     if (request.method === "GET" && request.url === "/health")
       return send(response, 200, { status: "ok" });
+    if (/^\/internal\//i.test(request.url ?? "")) {
+      const provided = Buffer.from(request.headers.authorization ?? "");
+      const expected = Buffer.from(`Bearer ${callbackToken}`);
+      if (
+        request.headers.origin !== undefined ||
+        provided.length !== expected.length ||
+        !timingSafeEqual(provided, expected)
+      )
+        return send(response, 401, { error: "Unauthorized" });
+    }
     if (await recordingUpload(request, response, recordings)) return;
     const internalEvents =
       /^\/internal\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/events$/i.exec(
@@ -137,31 +160,56 @@ const server = createServer((request, response) => {
         throw error;
       }
     }
-    const authorization = request.headers.authorization ?? "";
-    const provided = Buffer.from(authorization);
-    const expected = Buffer.from(`Bearer ${apiToken}`);
-    if (
-      request.headers.origin !== undefined ||
-      provided.length !== expected.length ||
-      !timingSafeEqual(provided, expected)
-    ) {
+    const authorization = /^Bearer ([A-Za-z0-9._~-]{1,10000})$/.exec(
+      request.headers.authorization ?? "",
+    );
+    if (request.headers.origin !== undefined || !authorization) {
       return send(response, 401, { error: "Unauthorized" });
     }
+    let identity;
+    try {
+      identity = await identityClient.verify(authorization[1]!);
+    } catch {
+      return send(response, 503, {
+        error: "Identity verification unavailable",
+      });
+    }
+    if (!identity) return send(response, 401, { error: "Unauthorized" });
+    const workspaceId = await workspaces.getOrCreate(identity);
+    const recordingMatch =
+      /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/recording$/i.exec(
+        request.url ?? "",
+      );
+    if (
+      recordingMatch &&
+      !(await store.getForWorkspace(
+        recordingMatch[1]!.toLowerCase(),
+        workspaceId,
+      ))
+    )
+      return send(response, 404, { error: "Run not found" });
     if (await recordingPlayback(request, response, recordings)) return;
     const eventsMatch =
       /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/events$/i.exec(
         request.url ?? "",
       );
     if (request.method === "GET" && eventsMatch) {
+      if (
+        !(await store.getForWorkspace(
+          eventsMatch[1]!.toLowerCase(),
+          workspaceId,
+        ))
+      )
+        return send(response, 404, { error: "Run not found" });
       const saved = await events.list(eventsMatch[1]!.toLowerCase());
       return saved
         ? send(response, 200, saved)
         : send(response, 404, { error: "Run not found" });
     }
     if (request.method === "GET" && request.url === "/runs")
-      return send(response, 200, await store.listRecent());
+      return send(response, 200, await store.listRecent(workspaceId));
     if (request.method === "GET" && request.url === "/workflows")
-      return send(response, 200, await workflows.list());
+      return send(response, 200, await workflows.list(workspaceId));
     if (request.method === "POST" && request.url === "/workflows") {
       if (
         !/^application\/json(?:\s*;|$)/i.test(
@@ -177,7 +225,11 @@ const server = createServer((request, response) => {
           error: error instanceof Error ? error.message : "Invalid workflow",
         });
       }
-      return send(response, 201, await workflows.create(definition));
+      return send(
+        response,
+        201,
+        await workflows.create(definition, workspaceId),
+      );
     }
     const versionMatch =
       /^\/workflows\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/versions\/([1-9][0-9]{0,9})$/i.exec(
@@ -187,7 +239,11 @@ const server = createServer((request, response) => {
       const number = Number(versionMatch[2]);
       if (number > 2147483647)
         return send(response, 400, { error: "Invalid workflow version" });
-      const found = await workflows.get(versionMatch[1]!.toLowerCase(), number);
+      const found = await workflows.get(
+        versionMatch[1]!.toLowerCase(),
+        workspaceId,
+        number,
+      );
       return found
         ? send(response, 200, found)
         : send(response, 404, { error: "Workflow version not found" });
@@ -199,15 +255,19 @@ const server = createServer((request, response) => {
     if (workflowMatch) {
       const workflowId = workflowMatch[1]!.toLowerCase();
       if (request.method === "GET" && !workflowMatch[2]) {
-        const found = await workflows.get(workflowId);
+        const found = await workflows.get(workflowId, workspaceId);
         return found
           ? send(response, 200, found)
           : send(response, 404, { error: "Workflow not found" });
       }
       if (request.method === "GET" && workflowMatch[2] === "runs") {
-        if (!(await workflows.get(workflowId)))
+        if (!(await workflows.get(workflowId, workspaceId)))
           return send(response, 404, { error: "Workflow not found" });
-        return send(response, 200, await store.listForWorkflow(workflowId));
+        return send(
+          response,
+          200,
+          await store.listForWorkflow(workflowId, workspaceId),
+        );
       }
       if (request.method === "POST" && workflowMatch[2] === "versions") {
         if (
@@ -237,6 +297,7 @@ const server = createServer((request, response) => {
           version = await workflows.addVersion(
             workflowId,
             definition,
+            workspaceId,
             header === undefined ? undefined : Number(header),
           );
         } catch (error) {
@@ -283,7 +344,11 @@ const server = createServer((request, response) => {
           body.version > 2147483647
         )
           return send(response, 400, { error: "Invalid workflow run" });
-        const version = await workflows.get(workflowId, body.version);
+        const version = await workflows.get(
+          workflowId,
+          workspaceId,
+          body.version,
+        );
         if (!version)
           return send(response, 404, { error: "Workflow version not found" });
         let input;
@@ -320,6 +385,7 @@ const server = createServer((request, response) => {
             202,
             await runs.create({
               ...input,
+              workspaceId,
               workflow: resolved,
               workflowId,
               workflowVersion: body.version,
@@ -352,7 +418,11 @@ const server = createServer((request, response) => {
         });
       }
       try {
-        return send(response, 202, await runs.create(input));
+        return send(
+          response,
+          202,
+          await runs.create({ ...input, workspaceId }),
+        );
       } catch (error) {
         if (
           error instanceof Error &&
@@ -367,12 +437,17 @@ const server = createServer((request, response) => {
         request.url ?? "",
       );
     if (match && request.method === "GET" && !match[2]) {
-      const record = await store.get(match[1]!.toLowerCase());
+      const record = await store.getForWorkspace(
+        match[1]!.toLowerCase(),
+        workspaceId,
+      );
       return record
         ? send(response, 200, record)
         : send(response, 404, { error: "Run not found" });
     }
     if (match && request.method === "POST" && match[2]) {
+      if (!(await store.getForWorkspace(match[1]!.toLowerCase(), workspaceId)))
+        return send(response, 404, { error: "Run not found" });
       const record = await runs.cancel(match[1]!.toLowerCase());
       return record
         ? send(response, 200, record)
