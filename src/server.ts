@@ -4,6 +4,8 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { RecordingStore } from "./recordings/store.js";
+import { recordingUpload } from "./recordings/routes.js";
 import { AgentsClient } from "./runs/agents-client.js";
 import { parseRun } from "./runs/contracts.js";
 import { parseUpdate } from "./runs/updates.js";
@@ -22,12 +24,14 @@ if (!/^[A-Za-z0-9_-]{32,256}$/.test(apiToken))
 const store = new RunStore(process.env.DATABASE_URL);
 await store.initialize();
 const workflows = new WorkflowStore(store.pool);
+const recordings = new RecordingStore(store.pool);
 const runs = new RunService(
   store,
   new AgentsClient(
     process.env.AGENTS_URL ?? "http://127.0.0.1:3100",
     process.env.AGENTS_API_TOKEN ?? "",
   ),
+  recordings,
 );
 runs.start();
 function send(response: ServerResponse, status: number, value: unknown): void {
@@ -56,6 +60,7 @@ const server = createServer((request, response) => {
   void (async () => {
     if (request.method === "GET" && request.url === "/health")
       return send(response, 200, { status: "ok" });
+    if (await recordingUpload(request, response, recordings)) return;
     const updateMatch =
       /^\/internal\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/update$/i.exec(
         request.url ?? "",

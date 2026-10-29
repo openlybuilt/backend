@@ -3,7 +3,10 @@ import { readFile } from "node:fs/promises";
 import pg from "pg";
 import type { RunRecord, RunRequest } from "./contracts.js";
 
-export type BackendRun = RunRecord & { cancelRequested: boolean };
+export type BackendRun = RunRecord & {
+  cancelRequested: boolean;
+  recordingStatus?: "pending" | "saved" | "failed" | "unavailable";
+};
 export class RunStore {
   readonly pool: pg.Pool;
   private readonly lock: pg.Client;
@@ -35,6 +38,12 @@ export class RunStore {
     await this.pool.query(
       await readFile(
         new URL("../../migrations/003_run_live_view.sql", import.meta.url),
+        "utf8",
+      ),
+    );
+    await this.pool.query(
+      await readFile(
+        new URL("../../migrations/004_recordings.sql", import.meta.url),
         "utf8",
       ),
     );
@@ -75,10 +84,20 @@ export class RunStore {
   }
   async get(id: string): Promise<BackendRun | undefined> {
     const result = await this.pool.query(
-      'SELECT id, instruction, max_steps AS "maxSteps", timeout_ms AS "timeoutMs", status, cancel_requested AS "cancelRequested", result, workflow, workflow_id AS "workflowId", workflow_version AS "workflowVersion", workflow_inputs AS "workflowInputs", steps, live_view_url AS "liveViewUrl", created_at AS "createdAt", updated_at AS "updatedAt" FROM backend_runs WHERE id=$1',
+      `SELECT id, instruction, max_steps AS "maxSteps", timeout_ms AS "timeoutMs", status, cancel_requested AS "cancelRequested", result, workflow, workflow_id AS "workflowId", workflow_version AS "workflowVersion", workflow_inputs AS "workflowInputs", steps, live_view_url AS "liveViewUrl", created_at AS "createdAt", updated_at AS "updatedAt", COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE id=$1`,
       [id],
     );
-    return result.rows[0] as BackendRun | undefined;
+    const record = result.rows[0] as BackendRun | undefined;
+    if (
+      record?.result &&
+      typeof record.result === "object" &&
+      !Array.isArray(record.result)
+    )
+      record.result = {
+        ...record.result,
+        recordingStatus: record.recordingStatus,
+      };
+    return record;
   }
   async requestCancel(id: string): Promise<void> {
     await this.pool.query(

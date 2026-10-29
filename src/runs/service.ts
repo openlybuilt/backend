@@ -1,3 +1,4 @@
+import { RecordingStore } from "../recordings/store.js";
 import { AgentsClient } from "./agents-client.js";
 import type { RunRequest } from "./contracts.js";
 import { RunStore, type BackendRun } from "./store.js";
@@ -17,6 +18,7 @@ export class RunService {
   constructor(
     private readonly store: RunStore,
     private readonly agents: AgentsClient,
+    private readonly recordings: RecordingStore,
   ) {}
   start(): void {
     const tick = () => {
@@ -88,14 +90,16 @@ export class RunService {
   }
   private async reconcileActive(): Promise<void> {
     for (const id of await this.store.activeIds()) await this.reconcile(id);
+    await this.recordings.expire();
   }
   private async reconcile(id: string): Promise<void> {
     if (this.dispatches.has(id)) return;
     const current = await this.store.get(id);
     if (!current || terminal.has(current.status)) return;
+    const cleanupGrace = current.recordingStatus === "pending" ? 60000 : 15000;
     const expired =
       Date.now() >
-      new Date(current.createdAt).getTime() + current.timeoutMs + 15000;
+      new Date(current.createdAt).getTime() + current.timeoutMs + cleanupGrace;
     try {
       const path = `/runs/${id}`;
       const remote = await this.agents.request(path, "GET");
