@@ -64,7 +64,10 @@ export class PlaceholderStore {
       throw new Error("Invalid placeholder");
     const obj = input as Record<string, unknown>;
     if (
-      Object.keys(obj).some((k) => !["name", "secret", "value"].includes(k)) ||
+      Object.keys(obj).some(
+        (k) => !["name", "secret", "value", "createOnly"].includes(k),
+      ) ||
+      (obj.createOnly !== undefined && typeof obj.createOnly !== "boolean") ||
       typeof obj.name !== "string" ||
       !namePattern.test(obj.name) ||
       typeof obj.secret !== "boolean" ||
@@ -85,10 +88,11 @@ export class PlaceholderStore {
       cipher.update(value, "utf8"),
       cipher.final(),
     ]);
-    await this.pool.query(
-      "INSERT INTO placeholders (workspace_id,name,secret,ciphertext,nonce,tag) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (workspace_id,name) DO UPDATE SET secret=EXCLUDED.secret,ciphertext=EXCLUDED.ciphertext,nonce=EXCLUDED.nonce,tag=EXCLUDED.tag,updated_at=now()",
+    const result = await this.pool.query(
+      `INSERT INTO placeholders (workspace_id,name,secret,ciphertext,nonce,tag) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (workspace_id,name) ${obj.createOnly ? "DO NOTHING" : "DO UPDATE SET secret=EXCLUDED.secret,ciphertext=EXCLUDED.ciphertext,nonce=EXCLUDED.nonce,tag=EXCLUDED.tag,updated_at=now()"}`,
       [workspace, name, secret, ciphertext, nonce, cipher.getAuthTag()],
     );
+    if (result.rowCount === 0) throw new Error("Placeholder already exists");
     return { name, secret, ...(!secret ? { value } : {}) };
   }
   async delete(workspace: string, name: string): Promise<boolean> {

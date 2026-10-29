@@ -55,7 +55,10 @@ const runs = new RunService(
 );
 runs.start();
 function send(response: ServerResponse, status: number, value: unknown): void {
-  response.writeHead(status, { "content-type": "application/json" });
+  response.writeHead(status, {
+    "content-type": "application/json",
+    "cache-control": "no-store",
+  });
   response.end(JSON.stringify(value));
 }
 async function readJson(
@@ -203,11 +206,16 @@ const server = createServer((request, response) => {
             "Invalid placeholder",
             "Invalid JSON",
             "Request body too large",
+            "Placeholder already exists",
           ].includes(error.message)
         )
           return send(
             response,
-            error.message === "Request body too large" ? 413 : 400,
+            error.message === "Request body too large"
+              ? 413
+              : error.message === "Placeholder already exists"
+                ? 409
+                : 400,
             { error: error.message },
           );
         throw error;
