@@ -225,7 +225,6 @@ export class RunStore {
     const result = await this.pool.query(
       `SELECT r.id,r.status,r.result,r.steps,r.workflow_id AS "workflowId",r.workflow_version AS "workflowVersion",r.created_at AS "createdAt",r.updated_at AS "updatedAt",r.recording_enabled AS "recordingEnabled",COALESCE(r.workflow->>'executionTarget','browser') AS "executionTarget",v.definition->>'name' AS "workflowName",COALESCE((SELECT status FROM run_recordings WHERE run_id=r.id),'unavailable') AS "recordingStatus" FROM backend_runs r JOIN workflow_versions v ON v.workflow_id=r.workflow_id AND v.version=r.workflow_version WHERE r.workspace_id=$1 ORDER BY r.created_at DESC,r.id DESC LIMIT 100`,
       [workspaceId],
-
     );
     return result.rows.map((record: RecentWorkflowRun) =>
       withRecordingStatus(record),
@@ -238,7 +237,6 @@ export class RunStore {
     const result = await this.pool.query(
       `SELECT id,status,result,steps,workflow_id AS "workflowId",workflow_version AS "workflowVersion",created_at AS "createdAt",updated_at AS "updatedAt",recording_enabled AS "recordingEnabled",COALESCE(workflow->>'executionTarget','browser') AS "executionTarget",COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY created_at DESC,id DESC LIMIT 100`,
       [workflowId, workspaceId],
-
     );
     return result.rows.map((record: WorkflowRun) =>
       withRecordingStatus(record),
