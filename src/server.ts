@@ -377,9 +377,14 @@ const server = createServer((request, response) => {
         if (
           Object.keys(body).some(
             (key) =>
-              !["id", "version", "inputs", "maxSteps", "timeoutMs"].includes(
-                key,
-              ),
+              ![
+                "id",
+                "version",
+                "inputs",
+                "maxSteps",
+                "timeoutMs",
+                "acknowledgeSecretExposure",
+              ].includes(key),
           ) ||
           typeof body.version !== "number" ||
           !Number.isInteger(body.version) ||
@@ -394,6 +399,37 @@ const server = createServer((request, response) => {
         );
         if (!version)
           return send(response, 404, { error: "Workflow version not found" });
+        if (
+          body.inputs !== undefined &&
+          (!body.inputs ||
+            typeof body.inputs !== "object" ||
+            Array.isArray(body.inputs) ||
+            Object.keys(body.inputs).length !== 0)
+        )
+          return send(response, 400, {
+            error: "Save placeholder values before running",
+          });
+        if (
+          body.acknowledgeSecretExposure !== undefined &&
+          typeof body.acknowledgeSecretExposure !== "boolean"
+        )
+          return send(response, 400, { error: "Invalid acknowledgment" });
+        const resolvedInputs = await placeholders.resolve(
+          workspaceId,
+          version.definition.inputs,
+        );
+        if (resolvedInputs.missing.length)
+          return send(response, 400, {
+            error: "Missing placeholder values",
+            missing: resolvedInputs.missing,
+          });
+        if (
+          resolvedInputs.secretNames.length &&
+          body.acknowledgeSecretExposure !== true
+        )
+          return send(response, 400, {
+            error: "Secret exposure acknowledgment required",
+          });
         let input;
         let resolved;
         try {
@@ -403,7 +439,7 @@ const server = createServer((request, response) => {
             maxSteps: body.maxSteps,
             timeoutMs: body.timeoutMs,
           });
-          resolved = resolveWorkflow(version.definition, body.inputs);
+          resolved = resolveWorkflow(version.definition, resolvedInputs.values);
           if (body.timeoutMs === undefined)
             input.timeoutMs = Math.min(
               600000,
@@ -418,8 +454,11 @@ const server = createServer((request, response) => {
             );
         } catch (error) {
           return send(response, 400, {
-            error:
-              error instanceof Error ? error.message : "Invalid workflow run",
+            error: resolvedInputs.secretNames.length
+              ? "Workflow contains an invalid placeholder value"
+              : error instanceof Error
+                ? error.message
+                : "Invalid workflow run",
           });
         }
         try {
@@ -432,7 +471,14 @@ const server = createServer((request, response) => {
               workflow: resolved,
               workflowId,
               workflowVersion: body.version,
-              workflowInputs: body.inputs as Record<string, string>,
+              containsSecrets: resolvedInputs.secretNames.length > 0,
+              requestFingerprint: placeholders.fingerprint({
+                workspaceId,
+                workflowId,
+                version: body.version,
+                input,
+                resolved,
+              }),
             }),
           );
         } catch (error) {

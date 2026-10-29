@@ -1,4 +1,9 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHmac,
+  randomBytes,
+} from "node:crypto";
 import type pg from "pg";
 
 const namePattern = /^[A-Za-z][A-Za-z0-9_]{0,49}$/;
@@ -27,6 +32,12 @@ export class PlaceholderStore {
   }
   private aad(workspace: string, name: string, secret: boolean): Buffer {
     return Buffer.from(JSON.stringify([workspace, name, secret]));
+  }
+  fingerprint(value: unknown): string {
+    return createHmac("sha256", this.key)
+      .update("virela-run-fingerprint-v1\0")
+      .update(JSON.stringify(value))
+      .digest("hex");
   }
   private decrypt(workspace: string, row: Row): string {
     const cipher = createDecipheriv("aes-256-gcm", this.key, row.nonce);

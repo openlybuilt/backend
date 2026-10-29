@@ -176,6 +176,8 @@ export function resolveWorkflow(
         };
       if (step.type === "ai")
         return { ...step, instruction: replace(step.instruction, strings) };
+      if (step.type === "press_keys")
+        return { ...step, keys: step.keys.map((key) => replace(key, strings)) };
       if (step.type === "click" && "target" in step)
         return { ...step, target: replace(step.target, strings) };
       return step;
@@ -224,6 +226,10 @@ export function parseDefinition(input: unknown): WorkflowDefinition {
             : replace(original, placeholders);
       }
     }
+    if (Array.isArray(copy.keys))
+      copy.keys = copy.keys.map((key) =>
+        typeof key === "string" ? replace(key, placeholders) : key,
+      );
     return copy;
   });
   if (sample.length > 0) parseWorkflow({ steps: sample });

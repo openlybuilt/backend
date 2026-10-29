@@ -93,39 +93,68 @@ export class RunStore {
       ),
     );
     await this.pool.query(
+      await readFile(
+        new URL("../../migrations/008_placeholder_runs.sql", import.meta.url),
+        "utf8",
+      ),
+    );
+    await this.pool.query(
       "UPDATE backend_runs SET status = 'dispatch_unknown', updated_at = now() WHERE status = 'dispatch_pending'",
     );
   }
   async create(request: RunRequest): Promise<BackendRun> {
     if (!request.workspaceId) throw new Error("Workspace is required");
     await this.pool.query(
-      "INSERT INTO backend_runs (id, instruction, max_steps, timeout_ms, status,workflow,workflow_id,workflow_version,workflow_inputs,workspace_id) VALUES ($1,$2,$3,$4,'dispatch_pending',$5::jsonb,$6::uuid,$7::integer,$8::jsonb,$9::uuid) ON CONFLICT (id) DO NOTHING",
+      "INSERT INTO backend_runs (id, instruction, max_steps, timeout_ms, status,workflow,workflow_id,workflow_version,workflow_inputs,workspace_id,request_fingerprint,contains_secrets) VALUES ($1,$2,$3,$4,'dispatch_pending',$5::jsonb,$6::uuid,$7::integer,$8::jsonb,$9::uuid,$10,$11) ON CONFLICT (id) DO NOTHING",
       [
         request.id,
         request.instruction,
         request.maxSteps,
         request.timeoutMs,
-        request.workflow ? JSON.stringify(request.workflow) : null,
+        request.requestFingerprint
+          ? null
+          : request.workflow
+            ? JSON.stringify(request.workflow)
+            : null,
         request.workflowId ?? null,
         request.workflowVersion ?? null,
-        request.workflowInputs ? JSON.stringify(request.workflowInputs) : null,
+        request.requestFingerprint
+          ? null
+          : request.workflowInputs
+            ? JSON.stringify(request.workflowInputs)
+            : null,
         request.workspaceId,
+        request.requestFingerprint ?? null,
+        request.containsSecrets ?? false,
       ],
     );
     const record = await this.get(request.id);
     if (!record) throw new Error("Run insert failed");
+    const stored = await this.pool.query<{
+      request_fingerprint: string | null;
+    }>("SELECT request_fingerprint FROM backend_runs WHERE id=$1", [
+      request.id,
+    ]);
     if (
       record.workspaceId !== request.workspaceId ||
+      (stored.rows[0]?.request_fingerprint ?? null) !==
+        (request.requestFingerprint ?? null) ||
       record.instruction !== request.instruction ||
       record.maxSteps !== request.maxSteps ||
       record.timeoutMs !== request.timeoutMs ||
-      !isDeepStrictEqual(record.workflow ?? null, request.workflow ?? null) ||
+      (request.requestFingerprint
+        ? stored.rows[0]?.request_fingerprint !== request.requestFingerprint
+        : !isDeepStrictEqual(
+            record.workflow ?? null,
+            request.workflow ?? null,
+          )) ||
       (record.workflowId ?? null) !== (request.workflowId ?? null) ||
       (record.workflowVersion ?? null) !== (request.workflowVersion ?? null) ||
-      !isDeepStrictEqual(
-        record.workflowInputs ?? null,
-        request.workflowInputs ?? null,
-      )
+      (!request.requestFingerprint &&
+        !isDeepStrictEqual(
+          record.workflowInputs ?? null,
+          request.workflowInputs ?? null,
+        ))
     )
       throw new Error("Run ID already has different inputs");
     return record;
@@ -192,6 +221,30 @@ export class RunStore {
     steps?: unknown,
     liveViewUrl?: string | null,
   ): Promise<void> {
+    const sensitivity = await this.pool.query<{ contains_secrets: boolean }>(
+      "SELECT contains_secrets FROM backend_runs WHERE id=$1",
+      [id],
+    );
+    if (sensitivity.rows[0]?.contains_secrets) {
+      const safeSteps = (value: unknown): unknown =>
+        Array.isArray(value)
+          ? value.map((step) => {
+              if (!step || typeof step !== "object" || Array.isArray(step))
+                return {};
+              const s = step as Record<string, unknown>;
+              return { index: s.index, type: s.type, status: s.status };
+            })
+          : undefined;
+      steps = safeSteps(steps);
+      if (result && typeof result === "object" && !Array.isArray(result)) {
+        const r = result as Record<string, unknown>;
+        result = {
+          status,
+          ...(r.logsPartial === true ? { logsPartial: true } : {}),
+          ...(Array.isArray(r.steps) ? { steps: safeSteps(r.steps) } : {}),
+        };
+      }
+    }
     await this.pool.query(
       "UPDATE backend_runs SET status=$2, result=COALESCE($3::jsonb,result), steps=COALESCE($4::jsonb,steps), live_view_url=CASE WHEN $2 IN ('completed','failed','cancelled','interrupted','outcome_unknown') THEN NULL WHEN $6 THEN $5 ELSE live_view_url END, updated_at=now() WHERE id=$1 AND status NOT IN ('completed','failed','cancelled','interrupted','outcome_unknown') AND (CASE $2 WHEN 'dispatch_pending' THEN 0 WHEN 'dispatch_unknown' THEN 1 WHEN 'provisioning' THEN 1 WHEN 'running' THEN 2 WHEN 'cancelling' THEN 3 WHEN 'cleaning_up' THEN 3 ELSE 4 END) >= (CASE status WHEN 'dispatch_pending' THEN 0 WHEN 'dispatch_unknown' THEN 1 WHEN 'provisioning' THEN 1 WHEN 'running' THEN 2 WHEN 'cancelling' THEN 3 WHEN 'cleaning_up' THEN 3 ELSE 4 END)",
       [
