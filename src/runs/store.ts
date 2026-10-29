@@ -5,7 +5,7 @@ import type { RunRecord, RunRequest } from "./contracts.js";
 
 export type BackendRun = RunRecord & {
   cancelRequested: boolean;
-  recordingStatus?: "pending" | "saved" | "failed" | "unavailable";
+  recordingStatus?: "pending" | "saved" | "failed" | "deleted" | "unavailable";
 };
 export type WorkflowRun = Pick<
   BackendRun,
@@ -99,13 +99,19 @@ export class RunStore {
       ),
     );
     await this.pool.query(
+      await readFile(
+        new URL("../../migrations/009_recording_controls.sql", import.meta.url),
+        "utf8",
+      ),
+    );
+    await this.pool.query(
       "UPDATE backend_runs SET status = 'dispatch_unknown', updated_at = now() WHERE status = 'dispatch_pending'",
     );
   }
   async create(request: RunRequest): Promise<BackendRun> {
     if (!request.workspaceId) throw new Error("Workspace is required");
     await this.pool.query(
-      "INSERT INTO backend_runs (id, instruction, max_steps, timeout_ms, status,workflow,workflow_id,workflow_version,workflow_inputs,workspace_id,request_fingerprint,contains_secrets) VALUES ($1,$2,$3,$4,'dispatch_pending',$5::jsonb,$6::uuid,$7::integer,$8::jsonb,$9::uuid,$10,$11) ON CONFLICT (id) DO NOTHING",
+      "INSERT INTO backend_runs (id, instruction, max_steps, timeout_ms, status,workflow,workflow_id,workflow_version,workflow_inputs,workspace_id,request_fingerprint,contains_secrets,recording_enabled) VALUES ($1,$2,$3,$4,'dispatch_pending',$5::jsonb,$6::uuid,$7::integer,$8::jsonb,$9::uuid,$10,$11,$12) ON CONFLICT (id) DO NOTHING",
       [
         request.id,
         request.instruction,
@@ -126,6 +132,7 @@ export class RunStore {
         request.workspaceId,
         request.requestFingerprint ?? null,
         request.containsSecrets ?? false,
+        request.recordingEnabled !== false,
       ],
     );
     const record = await this.get(request.id);
@@ -142,6 +149,7 @@ export class RunStore {
       record.instruction !== request.instruction ||
       record.maxSteps !== request.maxSteps ||
       record.timeoutMs !== request.timeoutMs ||
+      record.recordingEnabled !== (request.recordingEnabled !== false) ||
       (request.requestFingerprint
         ? stored.rows[0]?.request_fingerprint !== request.requestFingerprint
         : !isDeepStrictEqual(
@@ -161,7 +169,7 @@ export class RunStore {
   }
   async get(id: string): Promise<BackendRun | undefined> {
     const result = await this.pool.query(
-      `SELECT id, instruction, max_steps AS "maxSteps", timeout_ms AS "timeoutMs", status, cancel_requested AS "cancelRequested", result, workflow, workflow_id AS "workflowId", workflow_version AS "workflowVersion", workflow_inputs AS "workflowInputs", workspace_id AS "workspaceId", steps, live_view_url AS "liveViewUrl", created_at AS "createdAt", updated_at AS "updatedAt", COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE id=$1`,
+      `SELECT id, instruction, max_steps AS "maxSteps", timeout_ms AS "timeoutMs", recording_enabled AS "recordingEnabled", status, cancel_requested AS "cancelRequested", result, workflow, workflow_id AS "workflowId", workflow_version AS "workflowVersion", workflow_inputs AS "workflowInputs", workspace_id AS "workspaceId", steps, live_view_url AS "liveViewUrl", created_at AS "createdAt", updated_at AS "updatedAt", COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE id=$1`,
       [id],
     );
     const record = result.rows[0] as BackendRun | undefined;

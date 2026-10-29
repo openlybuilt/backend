@@ -239,6 +239,10 @@ const server = createServer((request, response) => {
       ))
     )
       return send(response, 404, { error: "Run not found" });
+    if (recordingMatch && request.method === "DELETE") {
+      await recordings.delete(recordingMatch[1]!.toLowerCase());
+      return send(response, 200, { deleted: true });
+    }
     if (await recordingPlayback(request, response, recordings)) return;
     const eventsMatch =
       /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/events$/i.exec(
@@ -392,6 +396,7 @@ const server = createServer((request, response) => {
                 "maxSteps",
                 "timeoutMs",
                 "acknowledgeSecretExposure",
+                "recordingEnabled",
               ].includes(key),
           ) ||
           typeof body.version !== "number" ||
@@ -446,6 +451,7 @@ const server = createServer((request, response) => {
             instruction: "Guided workflow",
             maxSteps: body.maxSteps,
             timeoutMs: body.timeoutMs,
+            recordingEnabled: body.recordingEnabled,
           });
           resolved = resolveWorkflow(version.definition, resolvedInputs.values);
           if (body.timeoutMs === undefined)
