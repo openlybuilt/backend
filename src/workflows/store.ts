@@ -31,6 +31,7 @@ export class WorkflowStore {
   async addVersion(
     id: string,
     definition: WorkflowDefinition,
+    expectedVersion?: number,
   ): Promise<WorkflowVersion | undefined> {
     const client = await this.pool.connect();
     try {
@@ -42,6 +43,14 @@ export class WorkflowStore {
       if (!owner.rowCount) {
         await client.query("ROLLBACK");
         return undefined;
+      }
+      if (expectedVersion !== undefined) {
+        const latest = await client.query(
+          "SELECT COALESCE(MAX(version),0)::integer AS version FROM workflow_versions WHERE workflow_id=$1",
+          [id],
+        );
+        if (latest.rows[0].version !== expectedVersion)
+          throw new Error("Workflow version conflict");
       }
       const result = await client.query(
         'INSERT INTO workflow_versions(workflow_id,version,definition) SELECT $1,COALESCE(MAX(version),0)+1,$2::jsonb FROM workflow_versions WHERE workflow_id=$1 RETURNING workflow_id AS id, version, definition, created_at AS "createdAt"',
