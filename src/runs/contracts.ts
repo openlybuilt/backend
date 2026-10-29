@@ -68,7 +68,7 @@ export function parseRun(value: unknown): RunRequest {
     typeof timeoutMs !== "number" ||
     !Number.isInteger(timeoutMs) ||
     timeoutMs < 1000 ||
-    timeoutMs > 600000
+    timeoutMs > 3600000
   )
     throw new Error("Invalid timeoutMs");
   if (
