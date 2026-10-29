@@ -6,6 +6,7 @@ import {
 } from "node:http";
 import { AgentsClient } from "./runs/agents-client.js";
 import { parseRun } from "./runs/contracts.js";
+import { parseUpdate } from "./runs/updates.js";
 import { RunService } from "./runs/service.js";
 import { RunStore } from "./runs/store.js";
 import { WorkflowStore } from "./workflows/store.js";
@@ -32,13 +33,16 @@ function send(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "content-type": "application/json" });
   response.end(JSON.stringify(value));
 }
-async function readJson(request: IncomingMessage): Promise<unknown> {
+async function readJson(
+  request: IncomingMessage,
+  limit = 32000,
+): Promise<unknown> {
   const chunks: Buffer[] = [];
   let bytes = 0;
   for await (const chunk of request) {
     const data = Buffer.from(chunk);
     bytes += data.length;
-    if (bytes > 32000) throw new Error("Request body too large");
+    if (bytes > limit) throw new Error("Request body too large");
     chunks.push(data);
   }
   try {
@@ -51,6 +55,30 @@ const server = createServer((request, response) => {
   void (async () => {
     if (request.method === "GET" && request.url === "/health")
       return send(response, 200, { status: "ok" });
+    const updateMatch =
+      /^\/internal\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/update$/i.exec(
+        request.url ?? "",
+      );
+    if (request.method === "POST" && updateMatch) {
+      if (
+        !/^application\/json(?:\s*;|$)/i.test(
+          request.headers["content-type"] ?? "",
+        )
+      )
+        return send(response, 415, { error: "JSON content type required" });
+      let update;
+      try {
+        update = parseUpdate(await readJson(request, 1024 * 1024));
+      } catch (error) {
+        return send(response, 400, {
+          error: error instanceof Error ? error.message : "Invalid run update",
+        });
+      }
+      const record = await runs.report(updateMatch[1]!.toLowerCase(), update);
+      return record
+        ? send(response, 200, record)
+        : send(response, 404, { error: "Run not found" });
+    }
     const authorization = request.headers.authorization ?? "";
     const provided = Buffer.from(authorization);
     const expected = Buffer.from(`Bearer ${apiToken}`);

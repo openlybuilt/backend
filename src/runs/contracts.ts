@@ -15,6 +15,7 @@ export type RunRecord = RunRequest & {
   createdAt: string;
   updatedAt: string;
   steps?: unknown;
+  liveViewUrl?: string | null;
 };
 export function parseRun(value: unknown): RunRequest {
   if (!value || typeof value !== "object" || Array.isArray(value))

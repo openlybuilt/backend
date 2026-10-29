@@ -1,6 +1,7 @@
 import { AgentsClient } from "./agents-client.js";
 import type { RunRequest } from "./contracts.js";
 import { RunStore, type BackendRun } from "./store.js";
+import type { RunUpdate } from "./updates.js";
 
 const terminal = new Set([
   "completed",
@@ -14,6 +15,16 @@ export class RunService {
     private readonly store: RunStore,
     private readonly agents: AgentsClient,
   ) {}
+  async report(id: string, update: RunUpdate): Promise<BackendRun | undefined> {
+    await this.store.update(
+      id,
+      update.status,
+      update.result,
+      update.steps,
+      update.liveViewUrl,
+    );
+    return this.store.get(id);
+  }
   async create(request: RunRequest): Promise<BackendRun> {
     const current = await this.store.create(request);
     if (terminal.has(current.status) || current.cancelRequested) return current;
@@ -46,7 +57,7 @@ export class RunService {
   }
   async reconcile(
     id: string,
-  ): Promise<(BackendRun & { liveViewUrl?: string }) | undefined> {
+  ): Promise<BackendRun | undefined> {
     const current = await this.store.get(id);
     if (!current || terminal.has(current.status)) return current;
     let liveViewUrl: string | undefined;

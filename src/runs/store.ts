@@ -33,6 +33,12 @@ export class RunStore {
     );
     await this.pool.query(workflowsSql);
     await this.pool.query(
+      await readFile(
+        new URL("../../migrations/003_run_live_view.sql", import.meta.url),
+        "utf8",
+      ),
+    );
+    await this.pool.query(
       "UPDATE backend_runs SET status = 'dispatch_unknown', updated_at = now() WHERE status = 'dispatch_pending'",
     );
   }
@@ -69,7 +75,7 @@ export class RunStore {
   }
   async get(id: string): Promise<BackendRun | undefined> {
     const result = await this.pool.query(
-      'SELECT id, instruction, max_steps AS "maxSteps", timeout_ms AS "timeoutMs", status, cancel_requested AS "cancelRequested", result, workflow, workflow_id AS "workflowId", workflow_version AS "workflowVersion", workflow_inputs AS "workflowInputs", steps, created_at AS "createdAt", updated_at AS "updatedAt" FROM backend_runs WHERE id=$1',
+      'SELECT id, instruction, max_steps AS "maxSteps", timeout_ms AS "timeoutMs", status, cancel_requested AS "cancelRequested", result, workflow, workflow_id AS "workflowId", workflow_version AS "workflowVersion", workflow_inputs AS "workflowInputs", steps, live_view_url AS "liveViewUrl", created_at AS "createdAt", updated_at AS "updatedAt" FROM backend_runs WHERE id=$1',
       [id],
     );
     return result.rows[0] as BackendRun | undefined;
@@ -85,14 +91,17 @@ export class RunStore {
     status: string,
     result: unknown,
     steps?: unknown,
+    liveViewUrl?: string | null,
   ): Promise<void> {
     await this.pool.query(
-      "UPDATE backend_runs SET status=$2, result=COALESCE($3::jsonb,result), steps=COALESCE($4::jsonb,steps), updated_at=now() WHERE id=$1 AND status NOT IN ('completed','failed','cancelled','interrupted','outcome_unknown') AND (CASE $2 WHEN 'dispatch_pending' THEN 0 WHEN 'dispatch_unknown' THEN 0 WHEN 'provisioning' THEN 1 WHEN 'running' THEN 2 WHEN 'cancelling' THEN 3 WHEN 'cleaning_up' THEN 3 ELSE 4 END) >= (CASE status WHEN 'dispatch_pending' THEN 0 WHEN 'dispatch_unknown' THEN 0 WHEN 'provisioning' THEN 1 WHEN 'running' THEN 2 WHEN 'cancelling' THEN 3 WHEN 'cleaning_up' THEN 3 ELSE 4 END)",
+      "UPDATE backend_runs SET status=$2, result=COALESCE($3::jsonb,result), steps=COALESCE($4::jsonb,steps), live_view_url=CASE WHEN $2 IN ('completed','failed','cancelled','interrupted','outcome_unknown') THEN NULL WHEN $6 THEN $5 ELSE live_view_url END, updated_at=now() WHERE id=$1 AND status NOT IN ('completed','failed','cancelled','interrupted','outcome_unknown') AND (CASE $2 WHEN 'dispatch_pending' THEN 0 WHEN 'dispatch_unknown' THEN 0 WHEN 'provisioning' THEN 1 WHEN 'running' THEN 2 WHEN 'cancelling' THEN 3 WHEN 'cleaning_up' THEN 3 ELSE 4 END) >= (CASE status WHEN 'dispatch_pending' THEN 0 WHEN 'dispatch_unknown' THEN 0 WHEN 'provisioning' THEN 1 WHEN 'running' THEN 2 WHEN 'cancelling' THEN 3 WHEN 'cleaning_up' THEN 3 ELSE 4 END)",
       [
         id,
         status,
         result === undefined || result === null ? null : JSON.stringify(result),
         steps === undefined || steps === null ? null : JSON.stringify(steps),
+        liveViewUrl ?? null,
+        liveViewUrl !== undefined,
       ],
     );
   }
