@@ -39,7 +39,9 @@ export class Database {
   private task?: Promise<void>;
   private closing = false;
   private available = false;
-  private initialized = false;
+  private recoveryNeeded = false;
+  private onUnavailable?: () => Promise<void>;
+  private draining = Promise.resolve();
 
   constructor(private readonly url: string) {
     this.pool = new pg.Pool({
@@ -65,17 +67,27 @@ export class Database {
   }
 
   unavailable(): void {
+    const firstLoss = !this.signal.aborted;
     this.available = false;
     this.controller.abort();
+    if (!this.closing) this.recoveryNeeded = true;
+    if (firstLoss && !this.closing && this.onUnavailable)
+      this.draining = Promise.resolve()
+        .then(this.onUnavailable)
+        .catch(() => undefined);
   }
 
-  start(prepare: (signal: AbortSignal) => Promise<void>): void {
+  start(
+    prepare: (signal: AbortSignal, recover: boolean) => Promise<void>,
+    onUnavailable: () => Promise<void>,
+  ): void {
     if (this.task) return;
+    this.onUnavailable = onUnavailable;
     this.task = this.connect(prepare).catch(() => this.unavailable());
   }
 
   private async connect(
-    prepare: (signal: AbortSignal) => Promise<void>,
+    prepare: (signal: AbortSignal, recover: boolean) => Promise<void>,
   ): Promise<void> {
     while (!this.closing) {
       const owner = new pg.Client({
@@ -96,10 +108,10 @@ export class Database {
           "SELECT pg_try_advisory_lock(78422117) AS acquired",
         );
         if (!lock.rows[0].acquired) throw new DatabaseUnavailableError();
-        await prepare(signal);
+        await prepare(signal, this.recoveryNeeded);
         signal.throwIfAborted();
         this.available = true;
-        this.initialized = true;
+        this.recoveryNeeded = false;
         while (!this.closing) {
           await delay(1000, undefined, { signal });
           await owner.query("SELECT 1");
@@ -108,11 +120,10 @@ export class Database {
       } catch {
         this.unavailable();
       } finally {
+        await this.draining;
         await owner.end().catch(() => undefined);
         if (this.owner === owner) this.owner = undefined;
       }
-      // An established owner stays unavailable until orchestration recovery is installed.
-      if (this.initialized) return;
       await delay(1000, undefined, { signal: this.lifetime.signal });
     }
   }

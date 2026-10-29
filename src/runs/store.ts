@@ -240,11 +240,23 @@ export class RunStore {
     );
     return result.rowCount === 1;
   }
-  async activeIds(): Promise<string[]> {
+  async activeIds(includePending = false): Promise<string[]> {
     const result = await this.pool.query(
-      "SELECT id FROM backend_runs WHERE status IN ('dispatch_unknown','provisioning','running','cleaning_up','cancelling')",
+      "SELECT id FROM backend_runs WHERE status IN ('dispatch_unknown','provisioning','running','cleaning_up','cancelling') OR ($1::boolean AND status='dispatch_pending')",
+      [includePending],
     );
     return result.rows.map((row: { id: string }) => row.id);
+  }
+  async interrupt(ids: string[]): Promise<void> {
+    await this.pool.query(
+      `WITH interrupted AS (
+        UPDATE backend_runs SET status='interrupted',cancel_requested=true,
+        result='{"status":"interrupted","message":"Execution interrupted by database outage","cleanupError":"Cleanup could not be confirmed after database outage"}'::jsonb,
+        live_view_url=NULL,updated_at=now()
+        WHERE id=ANY($1::uuid[]) AND status NOT IN ('completed','failed','cancelled','interrupted','outcome_unknown') RETURNING id
+      ) UPDATE run_recordings SET status='failed',updated_at=now() WHERE run_id IN (SELECT id FROM interrupted) AND status='pending'`,
+      [ids],
+    );
   }
   async update(
     id: string,

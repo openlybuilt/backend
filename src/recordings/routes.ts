@@ -44,6 +44,7 @@ export async function recordingUpload(
   request: IncomingMessage,
   response: ServerResponse,
   recordings: RecordingStore,
+  assertCurrent: () => void,
 ): Promise<boolean> {
   const match = new RegExp(
     `^/internal/runs/${runId}/recording(/status)?$`,
@@ -78,15 +79,18 @@ export async function recordingUpload(
         )
       )
         throw new BodyError(400, "Invalid recording status");
+      assertCurrent();
       const saved = await recordings.report(
         id,
         value.status,
         value.browserId as string | undefined,
         value.replayId as string | undefined,
       );
+      assertCurrent();
       send(response, saved ? 200 : 404, saved ?? { error: "Run not found" });
     } else {
       const existing = await recordings.get(id);
+      assertCurrent();
       if (!existing) throw new BodyError(404, "Pending recording not found");
       if (existing.status !== "pending") {
         request.resume();
@@ -96,6 +100,7 @@ export async function recordingUpload(
       if (!/^video\/mp4(?:\s*;|$)/i.test(contentType))
         throw new BodyError(415, "MP4 content type required");
       const video = await readBody(request, maxRecordingBytes);
+      assertCurrent();
       if (
         video.length < 16 ||
         video.toString("ascii", 4, 8) !== "ftyp" ||
@@ -104,6 +109,7 @@ export async function recordingUpload(
       )
         throw new BodyError(400, "Invalid MP4 recording");
       const saved = await recordings.save(id, video);
+      assertCurrent();
       send(
         response,
         saved?.status === "saved" ? 200 : 409,
@@ -122,6 +128,7 @@ export async function recordingPlayback(
   request: IncomingMessage,
   response: ServerResponse,
   recordings: RecordingStore,
+  assertCurrent: () => void,
 ): Promise<boolean> {
   const match = new RegExp(`^/runs/${runId}/recording$`, "i").exec(
     request.url ?? "",
@@ -129,6 +136,7 @@ export async function recordingPlayback(
   if (!match || !["GET", "HEAD"].includes(request.method ?? "")) return false;
   const id = match[1]!.toLowerCase();
   const metadata = await recordings.get(id);
+  assertCurrent();
   if (metadata?.status !== "saved" || !metadata.bytes) {
     send(response, 404, { error: "Recording not available" });
     return true;
@@ -171,6 +179,7 @@ export async function recordingPlayback(
     request.method === "HEAD"
       ? undefined
       : await recordings.read(id, start, end - start + 1);
+  assertCurrent();
   if (request.method !== "HEAD" && !video) {
     send(response, 404, { error: "Recording not available" });
     return true;

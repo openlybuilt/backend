@@ -65,10 +65,19 @@ const accountDeletion = new AccountDeletionService(
   store.pool,
   agents,
   identityClient,
+  () => database.ready,
+  () => database.signal,
 );
 accountDeletion.start();
 
-database.start(() => store.initialize());
+database.start(
+  async (signal, recover) => {
+    await store.initialize();
+    signal.throwIfAborted();
+    if (recover) await runs.recover(signal);
+  },
+  () => runs.pause(),
+);
 
 runs.start();
 function send(response: ServerResponse, status: number, value: unknown): void {
@@ -112,7 +121,15 @@ const server = createServer((request, response) => {
       return send(response, database.ready ? 200 : 503, {
         status: database.ready ? "ready" : "unavailable",
       });
-    database.assertReady();
+    const signal = database.signal;
+    const assertCurrent = () => database.assertReady(signal);
+    const whileReady = async <T>(operation: () => Promise<T>): Promise<T> => {
+      assertCurrent();
+      const result = await operation();
+      assertCurrent();
+      return result;
+    };
+    assertCurrent();
     if (/^\/internal\//i.test(request.url ?? "")) {
       const provided = Buffer.from(request.headers.authorization ?? "");
       const expected = Buffer.from(`Bearer ${callbackToken}`);
@@ -124,7 +141,9 @@ const server = createServer((request, response) => {
         return send(response, 401, { error: "Unauthorized" });
     }
 
-    if (await recordingUpload(request, response, recordings)) return;
+    if (await recordingUpload(request, response, recordings, assertCurrent))
+      return;
+
     const internalEvents =
       /^\/internal\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/events$/i.exec(
         request.url ?? "",
@@ -138,8 +157,11 @@ const server = createServer((request, response) => {
         return send(response, 415, { error: "JSON content type required" });
       let batch;
       try {
-        batch = parseEventBatch(await readJson(request, 32768));
+        batch = parseEventBatch(
+          await whileReady(() => readJson(request, 32768)),
+        );
       } catch (error) {
+        if (error instanceof DatabaseUnavailableError) throw error;
         request.resume();
         const message =
           error instanceof Error ? error.message : "Invalid event batch";
@@ -149,9 +171,8 @@ const server = createServer((request, response) => {
           { error: message },
         );
       }
-      const outcome = await events.append(
-        internalEvents[1]!.toLowerCase(),
-        batch,
+      const outcome = await whileReady(() =>
+        events.append(internalEvents[1]!.toLowerCase(), batch),
       );
       return outcome === "saved"
         ? send(response, 200, { accepted: batch.length })
@@ -175,14 +196,19 @@ const server = createServer((request, response) => {
         return send(response, 415, { error: "JSON content type required" });
       let update;
       try {
-        update = parseUpdate(await readJson(request, 1024 * 1024));
+        update = parseUpdate(
+          await whileReady(() => readJson(request, 1024 * 1024)),
+        );
       } catch (error) {
+        if (error instanceof DatabaseUnavailableError) throw error;
         return send(response, 400, {
           error: error instanceof Error ? error.message : "Invalid run update",
         });
       }
       try {
-        const record = await runs.report(updateMatch[1]!.toLowerCase(), update);
+        const record = await whileReady(() =>
+          runs.report(updateMatch[1]!.toLowerCase(), update),
+        );
         return record
           ? send(response, 200, record)
           : send(response, 404, { error: "Run not found" });
@@ -200,7 +226,9 @@ const server = createServer((request, response) => {
     }
     let identity;
     try {
-      identity = await identityClient.verify(authorization[1]!);
+      identity = await whileReady(() =>
+        identityClient.verify(authorization[1]!),
+      );
     } catch {
       return send(response, 503, {
         error: "Identity verification unavailable",
@@ -209,7 +237,11 @@ const server = createServer((request, response) => {
     if (!identity) return send(response, 401, { error: "Unauthorized" });
     if (request.method === "GET" && request.url === "/capabilities") {
       try {
-        return send(response, 200, await agents.capabilities());
+        return send(
+          response,
+          200,
+          await whileReady(() => agents.capabilities()),
+        );
       } catch {
         return send(response, 503, {
           error: "Execution capabilities unavailable",
@@ -218,13 +250,16 @@ const server = createServer((request, response) => {
     }
     if (request.method === "GET" && request.url === "/account/deletion") {
       return send(response, 200, {
-        status: (await accountDeletion.status(identity)) ?? "none",
+        status:
+          (await whileReady(() => accountDeletion.status(identity))) ?? "none",
       });
     }
     if (request.method === "DELETE" && request.url === "/account") {
       let verified;
       try {
-        verified = await identityClient.verifyDeletion(authorization[1]!);
+        verified = await whileReady(() =>
+          identityClient.verifyDeletion(authorization[1]!),
+        );
       } catch {
         return send(response, 503, {
           error: "Account verification unavailable",
@@ -240,6 +275,7 @@ const server = createServer((request, response) => {
           error: "Recent verification required",
         });
       try {
+        assertCurrent();
         await accountGate.block(identity);
       } catch {
         return send(response, 409, {
@@ -247,8 +283,10 @@ const server = createServer((request, response) => {
         });
       }
       try {
-        const workspaceId = await workspaces.getOrCreate(identity);
-        await accountDeletion.queue(identity, workspaceId);
+        const workspaceId = await whileReady(() =>
+          workspaces.getOrCreate(identity),
+        );
+        await whileReady(() => accountDeletion.queue(identity, workspaceId));
       } catch (error) {
         if (
           error instanceof Error &&
@@ -265,7 +303,7 @@ const server = createServer((request, response) => {
       return send(response, 409, { error: "Account deletion requested" });
     let workspaceId: string;
     try {
-      workspaceId = await workspaces.getOrCreate(identity);
+      workspaceId = await whileReady(() => workspaces.getOrCreate(identity));
     } catch (error) {
       if (
         error instanceof Error &&
@@ -276,8 +314,10 @@ const server = createServer((request, response) => {
     }
     if (request.url === "/settings/recordings" && request.method === "GET")
       return send(response, 200, {
-        enabled: await recordingPreferences.get(workspaceId),
-        stopping: await recordingPreferences.stopping(workspaceId),
+        enabled: await whileReady(() => recordingPreferences.get(workspaceId)),
+        stopping: await whileReady(() =>
+          recordingPreferences.stopping(workspaceId),
+        ),
       });
     if (request.url === "/settings/recordings" && request.method === "POST") {
       if (
@@ -288,8 +328,9 @@ const server = createServer((request, response) => {
         return send(response, 415, { error: "JSON content type required" });
       let body: unknown;
       try {
-        body = await readJson(request);
-      } catch {
+        body = await whileReady(() => readJson(request));
+      } catch (error) {
+        if (error instanceof DatabaseUnavailableError) throw error;
         return send(response, 400, { error: "Invalid JSON" });
       }
       if (
@@ -301,14 +342,20 @@ const server = createServer((request, response) => {
       )
         return send(response, 400, { error: "Invalid recording preference" });
       const enabled = (body as { enabled: boolean }).enabled;
-      await recordingPreferences.set(workspaceId, enabled);
+      await whileReady(() => recordingPreferences.set(workspaceId, enabled));
       return send(response, 200, {
         enabled,
-        stopping: await recordingPreferences.stopping(workspaceId),
+        stopping: await whileReady(() =>
+          recordingPreferences.stopping(workspaceId),
+        ),
       });
     }
     if (request.method === "GET" && request.url === "/placeholders")
-      return send(response, 200, await placeholders.list(workspaceId));
+      return send(
+        response,
+        200,
+        await whileReady(() => placeholders.list(workspaceId)),
+      );
     if (request.method === "POST" && request.url === "/placeholders") {
       if (
         !/^application\/json(?:\s*;|$)/i.test(
@@ -320,7 +367,11 @@ const server = createServer((request, response) => {
         return send(
           response,
           200,
-          await placeholders.save(workspaceId, await readJson(request)),
+          await whileReady(async () => {
+            const body = await readJson(request);
+            assertCurrent();
+            return placeholders.save(workspaceId, body);
+          }),
         );
       } catch (error) {
         if (
@@ -347,7 +398,9 @@ const server = createServer((request, response) => {
     const placeholderMatch =
       /^\/placeholders\/([A-Za-z][A-Za-z0-9_]{0,49})$/.exec(request.url ?? "");
     if (request.method === "DELETE" && placeholderMatch)
-      return (await placeholders.delete(workspaceId, placeholderMatch[1]!))
+      return (await whileReady(() =>
+        placeholders.delete(workspaceId, placeholderMatch[1]!),
+      ))
         ? send(response, 200, { deleted: true })
         : send(response, 404, { error: "Placeholder not found" });
     const recordingMatch =
@@ -356,38 +409,51 @@ const server = createServer((request, response) => {
       );
     if (
       recordingMatch &&
-      !(await store.getForWorkspace(
-        recordingMatch[1]!.toLowerCase(),
-        workspaceId,
+      !(await whileReady(() =>
+        store.getForWorkspace(recordingMatch[1]!.toLowerCase(), workspaceId),
       ))
     )
       return send(response, 404, { error: "Run not found" });
     if (recordingMatch && request.method === "DELETE") {
-      await recordings.delete(recordingMatch[1]!.toLowerCase());
+      await whileReady(() =>
+        recordings.delete(recordingMatch[1]!.toLowerCase()),
+      );
       return send(response, 200, { deleted: true });
     }
-    if (await recordingPlayback(request, response, recordings)) return;
+    if (await recordingPlayback(request, response, recordings, assertCurrent))
+      return;
     const eventsMatch =
       /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/events$/i.exec(
         request.url ?? "",
       );
     if (request.method === "GET" && eventsMatch) {
       if (
-        !(await store.getForWorkspace(
-          eventsMatch[1]!.toLowerCase(),
-          workspaceId,
+        !(await whileReady(() =>
+          store.getForWorkspace(eventsMatch[1]!.toLowerCase(), workspaceId),
         ))
       )
         return send(response, 404, { error: "Run not found" });
-      const saved = await events.list(eventsMatch[1]!.toLowerCase());
+      const saved = await whileReady(() =>
+        events.list(eventsMatch[1]!.toLowerCase()),
+      );
+
       return saved
         ? send(response, 200, saved)
         : send(response, 404, { error: "Run not found" });
     }
     if (request.method === "GET" && request.url === "/runs")
-      return send(response, 200, await store.listRecent(workspaceId));
+      return send(
+        response,
+        200,
+        await whileReady(() => store.listRecent(workspaceId)),
+      );
     if (request.method === "GET" && request.url === "/workflows")
-      return send(response, 200, await workflows.list(workspaceId));
+      return send(
+        response,
+        200,
+        await whileReady(() => workflows.list(workspaceId)),
+      );
+
     if (request.method === "POST" && request.url === "/workflows") {
       if (
         !/^application\/json(?:\s*;|$)/i.test(
@@ -397,8 +463,9 @@ const server = createServer((request, response) => {
         return send(response, 415, { error: "JSON content type required" });
       let definition;
       try {
-        definition = parseDefinition(await readJson(request));
+        definition = parseDefinition(await whileReady(() => readJson(request)));
       } catch (error) {
+        if (error instanceof DatabaseUnavailableError) throw error;
         return send(response, 400, {
           error: error instanceof Error ? error.message : "Invalid workflow",
         });
@@ -406,7 +473,7 @@ const server = createServer((request, response) => {
       return send(
         response,
         201,
-        await workflows.create(definition, workspaceId),
+        await whileReady(() => workflows.create(definition, workspaceId)),
       );
     }
     const versionMatch =
@@ -417,10 +484,8 @@ const server = createServer((request, response) => {
       const number = Number(versionMatch[2]);
       if (number > 2147483647)
         return send(response, 400, { error: "Invalid workflow version" });
-      const found = await workflows.get(
-        versionMatch[1]!.toLowerCase(),
-        workspaceId,
-        number,
+      const found = await whileReady(() =>
+        workflows.get(versionMatch[1]!.toLowerCase(), workspaceId, number),
       );
       return found
         ? send(response, 200, found)
@@ -433,18 +498,23 @@ const server = createServer((request, response) => {
     if (workflowMatch) {
       const workflowId = workflowMatch[1]!.toLowerCase();
       if (request.method === "GET" && !workflowMatch[2]) {
-        const found = await workflows.get(workflowId, workspaceId);
+        const found = await whileReady(() =>
+          workflows.get(workflowId, workspaceId),
+        );
+
         return found
           ? send(response, 200, found)
           : send(response, 404, { error: "Workflow not found" });
       }
       if (request.method === "GET" && workflowMatch[2] === "runs") {
-        if (!(await workflows.get(workflowId, workspaceId)))
+        if (!(await whileReady(() => workflows.get(workflowId, workspaceId))))
           return send(response, 404, { error: "Workflow not found" });
         return send(
           response,
           200,
-          await store.listForWorkflow(workflowId, workspaceId),
+          await whileReady(() =>
+            store.listForWorkflow(workflowId, workspaceId),
+          ),
         );
       }
       if (request.method === "POST" && workflowMatch[2] === "versions") {
@@ -456,8 +526,11 @@ const server = createServer((request, response) => {
           return send(response, 415, { error: "JSON content type required" });
         let definition;
         try {
-          definition = parseDefinition(await readJson(request));
+          definition = parseDefinition(
+            await whileReady(() => readJson(request)),
+          );
         } catch (error) {
+          if (error instanceof DatabaseUnavailableError) throw error;
           return send(response, 400, {
             error: error instanceof Error ? error.message : "Invalid workflow",
           });
@@ -472,11 +545,13 @@ const server = createServer((request, response) => {
           return send(response, 400, { error: "Invalid workflow version" });
         let version;
         try {
-          version = await workflows.addVersion(
-            workflowId,
-            definition,
-            workspaceId,
-            header === undefined ? undefined : Number(header),
+          version = await whileReady(() =>
+            workflows.addVersion(
+              workflowId,
+              definition,
+              workspaceId,
+              header === undefined ? undefined : Number(header),
+            ),
           );
         } catch (error) {
           if (
@@ -502,8 +577,9 @@ const server = createServer((request, response) => {
           return send(response, 415, { error: "JSON content type required" });
         let raw: unknown;
         try {
-          raw = await readJson(request);
-        } catch {
+          raw = await whileReady(() => readJson(request));
+        } catch (error) {
+          if (error instanceof DatabaseUnavailableError) throw error;
           return send(response, 400, { error: "Invalid JSON" });
         }
         if (!raw || typeof raw !== "object" || Array.isArray(raw))
@@ -528,10 +604,9 @@ const server = createServer((request, response) => {
           body.version > 2147483647
         )
           return send(response, 400, { error: "Invalid workflow run" });
-        const version = await workflows.get(
-          workflowId,
-          workspaceId,
-          body.version,
+        const versionNumber = body.version;
+        const version = await whileReady(() =>
+          workflows.get(workflowId, workspaceId, versionNumber),
         );
         if (!version)
           return send(response, 404, { error: "Workflow version not found" });
@@ -602,21 +677,23 @@ const server = createServer((request, response) => {
           return send(
             response,
             202,
-            await runs.create({
-              ...input,
-              workspaceId,
-              workflow: resolved,
-              workflowId,
-              workflowVersion: body.version,
-              containsSecrets: resolvedInputs.secretNames.length > 0,
-              requestFingerprint: placeholders.fingerprint({
+            await whileReady(() =>
+              runs.create({
+                ...input,
                 workspaceId,
+                workflow: resolved,
                 workflowId,
-                version: body.version,
-                input,
-                resolved,
+                workflowVersion: versionNumber,
+                containsSecrets: resolvedInputs.secretNames.length > 0,
+                requestFingerprint: placeholders.fingerprint({
+                  workspaceId,
+                  workflowId,
+                  version: versionNumber,
+                  input,
+                  resolved,
+                }),
               }),
-            }),
+            ),
           );
         } catch (error) {
           if (
@@ -637,8 +714,9 @@ const server = createServer((request, response) => {
         return send(response, 415, { error: "JSON content type required" });
       let input;
       try {
-        input = parseRun(await readJson(request));
+        input = parseRun(await whileReady(() => readJson(request)));
       } catch (error) {
+        if (error instanceof DatabaseUnavailableError) throw error;
         return send(response, 400, {
           error: error instanceof Error ? error.message : "Invalid request",
         });
@@ -647,7 +725,7 @@ const server = createServer((request, response) => {
         return send(
           response,
           202,
-          await runs.create({ ...input, workspaceId }),
+          await whileReady(() => runs.create({ ...input, workspaceId })),
         );
       } catch (error) {
         if (
@@ -663,18 +741,25 @@ const server = createServer((request, response) => {
         request.url ?? "",
       );
     if (match && request.method === "GET" && !match[2]) {
-      const record = await store.getForWorkspace(
-        match[1]!.toLowerCase(),
-        workspaceId,
+      const record = await whileReady(() =>
+        store.getForWorkspace(match[1]!.toLowerCase(), workspaceId),
       );
+
       return record
         ? send(response, 200, record)
         : send(response, 404, { error: "Run not found" });
     }
     if (match && request.method === "POST" && match[2]) {
-      if (!(await store.getForWorkspace(match[1]!.toLowerCase(), workspaceId)))
+      if (
+        !(await whileReady(() =>
+          store.getForWorkspace(match[1]!.toLowerCase(), workspaceId),
+        ))
+      )
         return send(response, 404, { error: "Run not found" });
-      const record = await runs.cancel(match[1]!.toLowerCase());
+      const record = await whileReady(() =>
+        runs.cancel(match[1]!.toLowerCase()),
+      );
+
       return record
         ? send(response, 200, record)
         : send(response, 404, { error: "Run not found" });
@@ -683,24 +768,33 @@ const server = createServer((request, response) => {
   })()
     .catch((error: unknown) => {
       if (isDatabaseFailure(error)) database.unavailable();
-      const unavailable = error instanceof DatabaseUnavailableError || !database.ready;
+      const unavailable =
+        error instanceof DatabaseUnavailableError || !database.ready;
       if (!response.headersSent)
         send(response, unavailable ? 503 : 500, {
-          error: unavailable ? "Database is currently unavailable" : "Internal service error",
+          error: unavailable
+            ? "Database is currently unavailable"
+            : "Internal service error",
         });
       else response.end();
     })
     .finally(() => releaseAccount?.());
-
 });
 server.listen(Number(rawPort), "127.0.0.1", () =>
   console.log(`Backend listening on 127.0.0.1:${rawPort}`),
 );
 for (const signal of ["SIGINT", "SIGTERM"] as const)
   process.once(signal, () => {
-    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
-    void Promise.all([runs.stop(), accountDeletion.stop(), database.stop(), closed]).catch(() => {
+    const closed = new Promise<void>((resolve) =>
+      server.close(() => resolve()),
+    );
+    server.closeAllConnections();
+    void Promise.all([
+      runs.stop(),
+      accountDeletion.stop(),
+      database.stop(),
+      closed,
+    ]).catch(() => {
       process.exitCode = 1;
-
     });
   });

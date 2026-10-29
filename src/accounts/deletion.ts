@@ -57,6 +57,8 @@ export class AccountDeletionService {
     private readonly pool: pg.Pool,
     private readonly agents: AgentsClient,
     private readonly auth: IdentityClient,
+    private readonly databaseReady: () => boolean,
+    private readonly databaseSignal: () => AbortSignal,
   ) {}
   async queue(identity: VerifiedIdentity, workspaceId: string): Promise<void> {
     await this.pool.query(
@@ -78,7 +80,7 @@ export class AccountDeletionService {
     this.kick();
   }
   private kick(): void {
-    if (this.sweep) return;
+    if (this.sweep || !this.databaseReady()) return;
     this.sweep = this.process()
       .catch(() => console.error("Account deletion processing failed"))
       .finally(() => {
@@ -90,13 +92,26 @@ export class AccountDeletionService {
     await this.sweep;
   }
   private async process(): Promise<void> {
+    const signal = this.databaseSignal();
+    const assertCurrent = () => {
+      if (
+        !this.databaseReady() ||
+        signal.aborted ||
+        signal !== this.databaseSignal()
+      )
+        throw new Error("Database ownership unavailable");
+    };
+    assertCurrent();
     const jobs = await this.pool.query<Job>(
       "SELECT identity_hash,issuer,subject,workspace_id,state FROM account_deletions WHERE state IN ('pending','data_deleted') ORDER BY updated_at LIMIT 100",
     );
+    assertCurrent();
     for (const job of jobs.rows) {
       try {
-        await this.processOne(job);
+        assertCurrent();
+        await this.processOne(job, assertCurrent);
       } catch {
+        assertCurrent();
         console.error("Account deletion will be retried");
         await this.pool.query(
           "UPDATE account_deletions SET updated_at=now() WHERE identity_hash=$1",
@@ -105,7 +120,7 @@ export class AccountDeletionService {
       }
     }
   }
-  private async processOne(job: Job): Promise<void> {
+  private async processOne(job: Job, assertCurrent: () => void): Promise<void> {
     if (job.state === "pending") {
       const ids = await this.pool.query<{
         id: string;
@@ -117,8 +132,11 @@ export class AccountDeletionService {
         [job.workspace_id],
       );
       let active = false;
+      assertCurrent();
       for (const { id, status, result, contains_secrets } of ids.rows) {
+        assertCurrent();
         const remote = await this.agents.request(`/runs/${id}`, "GET");
+        assertCurrent();
         if (remote) {
           if (remote.id !== id) throw new Error("Invalid agents response");
           await this.agents.request(`/runs/${id}/cancel`, "POST");
@@ -133,6 +151,7 @@ export class AccountDeletionService {
           active = true;
         }
       }
+      assertCurrent();
       if (active) {
         await this.pool.query(
           "UPDATE account_deletions SET updated_at=now() WHERE identity_hash=$1",
@@ -142,6 +161,7 @@ export class AccountDeletionService {
       }
       const client = await this.pool.connect();
       try {
+        assertCurrent();
         await client.query("BEGIN");
         // Provider cleanup is not implemented yet; retain references and do not
         // claim account deletion completed for runs that could have replays.
@@ -185,6 +205,7 @@ export class AccountDeletionService {
               : "data_deleted",
           ],
         );
+        assertCurrent();
         await client.query("COMMIT");
         if (providerCleanup.rowCount) return;
       } catch (error) {
@@ -194,7 +215,9 @@ export class AccountDeletionService {
         client.release();
       }
     }
+    assertCurrent();
     await this.auth.deleteUser(job.subject);
+    assertCurrent();
     await this.pool.query(
       "UPDATE account_deletions SET state='deleted',issuer=NULL,subject=NULL,workspace_id=NULL,updated_at=now() WHERE identity_hash=$1",
       [job.identity_hash],

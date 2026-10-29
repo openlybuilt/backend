@@ -14,6 +14,7 @@ const terminal = new Set([
 ]);
 export class RunService {
   private readonly dispatches = new Map<string, Promise<BackendRun>>();
+  private readonly owned = new Set<string>();
   private timer?: ReturnType<typeof setInterval>;
   private sweep?: Promise<void>;
   constructor(
@@ -42,9 +43,33 @@ export class RunService {
     await this.sweep;
     await Promise.allSettled(this.dispatches.values());
   }
+  async pause(): Promise<void> {
+    const ids = [...this.owned];
+    this.owned.clear();
+    await Promise.allSettled([
+      ...ids.map((id) => this.agents.request(`/runs/${id}/cancel`, "POST")),
+      ...this.dispatches.values(),
+      ...(this.sweep ? [this.sweep] : []),
+    ]);
+  }
+  async recover(signal: AbortSignal): Promise<void> {
+    await this.pause();
+    signal.throwIfAborted();
+    const ids = await this.store.activeIds(true);
+    signal.throwIfAborted();
+    await Promise.allSettled(
+      ids.map((id) =>
+        this.agents.request(`/runs/${id}/cancel`, "POST", undefined, signal),
+      ),
+    );
+    signal.throwIfAborted();
+    await this.store.interrupt(ids);
+    signal.throwIfAborted();
+  }
   async report(id: string, update: RunUpdate): Promise<BackendRun | undefined> {
     const signal = this.database.signal;
     this.database.assertReady(signal);
+    this.owned.add(id);
     await this.store.update(
       id,
       update.status,
@@ -55,6 +80,7 @@ export class RunService {
     this.database.assertReady(signal);
     const saved = await this.store.get(id);
     this.database.assertReady(signal);
+    if (!saved || terminal.has(saved.status)) this.owned.delete(id);
     if (saved && terminal.has(saved.status) && saved.status !== update.status)
       throw new Error("Run already finished");
     return saved;
@@ -64,6 +90,7 @@ export class RunService {
     this.database.assertReady(signal);
     const current = await this.store.create(request);
     this.database.assertReady(signal);
+    if (!terminal.has(current.status)) this.owned.add(request.id);
     const pending = this.dispatches.get(request.id);
     if (pending) return pending;
     if (current.status !== "dispatch_pending" || current.cancelRequested)
@@ -132,6 +159,7 @@ export class RunService {
     this.database.assertReady(signal);
     const ids = await this.store.activeIds();
     this.database.assertReady(signal);
+    for (const id of ids) this.owned.add(id);
     for (const id of ids) await this.reconcile(id, signal);
     this.database.assertReady(signal);
     const pendingStops = await this.store.pool.query<{ id: string }>(
@@ -141,7 +169,10 @@ export class RunService {
     for (const { id } of pendingStops.rows) {
       try {
         const stopped = await this.agents.request(
-          `/runs/${id}/recording/stop`, "POST", undefined, signal,
+          `/runs/${id}/recording/stop`,
+          "POST",
+          undefined,
+          signal,
         );
         this.database.assertReady(signal);
         const current = await this.store.get(id);
@@ -163,7 +194,10 @@ export class RunService {
     if (this.dispatches.has(id)) return;
     const current = await this.store.get(id);
     this.database.assertReady(signal);
-    if (!current || terminal.has(current.status)) return;
+    if (!current || terminal.has(current.status)) {
+      this.owned.delete(id);
+      return;
+    }
     const cleanupGrace = current.recordingStatus === "pending" ? 60000 : 15000;
     const expired =
       Date.now() >
@@ -213,6 +247,9 @@ export class RunService {
     await this.store.requestCancel(id);
     this.database.assertReady(signal);
     await this.reconcile(id, signal);
-    return this.store.get(id);
+    this.database.assertReady(signal);
+    const saved = await this.store.get(id);
+    this.database.assertReady(signal);
+    return saved;
   }
 }
