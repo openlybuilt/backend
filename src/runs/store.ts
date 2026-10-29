@@ -19,6 +19,21 @@ export type WorkflowRun = Pick<
   | "updatedAt"
   | "recordingStatus"
 >;
+export type RecentWorkflowRun = WorkflowRun & { workflowName: string };
+
+function withRecordingStatus<T extends WorkflowRun>(record: T): T {
+  if (
+    record.result &&
+    typeof record.result === "object" &&
+    !Array.isArray(record.result)
+  )
+    record.result = {
+      ...record.result,
+      recordingStatus: record.recordingStatus,
+    };
+  return record;
+}
+
 export class RunStore {
   readonly pool: pg.Pool;
   private readonly lock: pg.Client;
@@ -100,34 +115,24 @@ export class RunStore {
       [id],
     );
     const record = result.rows[0] as BackendRun | undefined;
-    if (
-      record?.result &&
-      typeof record.result === "object" &&
-      !Array.isArray(record.result)
-    )
-      record.result = {
-        ...record.result,
-        recordingStatus: record.recordingStatus,
-      };
-    return record;
+    return record ? withRecordingStatus(record) : undefined;
+  }
+  async listRecent(): Promise<RecentWorkflowRun[]> {
+    const result = await this.pool.query(
+      `SELECT r.id,r.status,r.result,r.steps,r.workflow_id AS "workflowId",r.workflow_version AS "workflowVersion",r.created_at AS "createdAt",r.updated_at AS "updatedAt",v.definition->>'name' AS "workflowName",COALESCE((SELECT status FROM run_recordings WHERE run_id=r.id),'unavailable') AS "recordingStatus" FROM backend_runs r JOIN workflow_versions v ON v.workflow_id=r.workflow_id AND v.version=r.workflow_version ORDER BY r.created_at DESC,r.id DESC LIMIT 100`,
+    );
+    return result.rows.map((record: RecentWorkflowRun) =>
+      withRecordingStatus(record),
+    );
   }
   async listForWorkflow(workflowId: string): Promise<WorkflowRun[]> {
     const result = await this.pool.query(
       `SELECT id,status,result,steps,workflow_id AS "workflowId",workflow_version AS "workflowVersion",created_at AS "createdAt",updated_at AS "updatedAt",COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE workflow_id=$1 ORDER BY created_at DESC,id DESC LIMIT 100`,
       [workflowId],
     );
-    return result.rows.map((record: WorkflowRun) => {
-      if (
-        record.result &&
-        typeof record.result === "object" &&
-        !Array.isArray(record.result)
-      )
-        record.result = {
-          ...record.result,
-          recordingStatus: record.recordingStatus,
-        };
-      return record;
-    });
+    return result.rows.map((record: WorkflowRun) =>
+      withRecordingStatus(record),
+    );
   }
   async requestCancel(id: string): Promise<void> {
     await this.pool.query(
