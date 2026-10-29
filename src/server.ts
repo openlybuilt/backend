@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -24,6 +25,15 @@ const identityClient = new IdentityClient(
   process.env.AUTH_VERIFY_URL ?? "",
   process.env.AUTH_SERVICE_TOKEN ?? "",
 );
+const callbackToken = process.env.AGENTS_CALLBACK_TOKEN ?? "";
+if (!/^[A-Za-z0-9_-]{32,256}$/.test(callbackToken))
+  throw new Error(
+    "AGENTS_CALLBACK_TOKEN must be 32 to 256 URL-safe characters",
+  );
+if (callbackToken === process.env.AUTH_SERVICE_TOKEN)
+  throw new Error(
+    "Agent callback and identity service credentials must differ",
+  );
 const store = new RunStore(process.env.DATABASE_URL);
 await store.initialize();
 const workflows = new WorkflowStore(store.pool);
@@ -72,6 +82,16 @@ const server = createServer((request, response) => {
   void (async () => {
     if (request.method === "GET" && request.url === "/health")
       return send(response, 200, { status: "ok" });
+    if (/^\/internal\//i.test(request.url ?? "")) {
+      const provided = Buffer.from(request.headers.authorization ?? "");
+      const expected = Buffer.from(`Bearer ${callbackToken}`);
+      if (
+        request.headers.origin !== undefined ||
+        provided.length !== expected.length ||
+        !timingSafeEqual(provided, expected)
+      )
+        return send(response, 401, { error: "Unauthorized" });
+    }
     if (await recordingUpload(request, response, recordings)) return;
     const internalEvents =
       /^\/internal\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/events$/i.exec(
