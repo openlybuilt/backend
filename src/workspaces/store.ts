@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
+import { identityHash } from "../accounts/deletion.js";
 import { defaultWorkflow } from "../workflows/default-workflow.js";
 
 export type VerifiedIdentity = { issuer: string; subject: string };
@@ -11,6 +12,11 @@ export class WorkspaceStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      const deletion = await client.query(
+        "SELECT 1 FROM account_deletions WHERE identity_hash=$1",
+        [identityHash(identity)],
+      );
+      if (deletion.rowCount) throw new Error("Account deletion requested");
       const person = await client.query<{ id: string }>(
         "INSERT INTO identities (id,issuer,subject) VALUES ($1,$2,$3) ON CONFLICT (issuer,subject) DO UPDATE SET subject=EXCLUDED.subject RETURNING id",
         [randomUUID(), identity.issuer, identity.subject],
