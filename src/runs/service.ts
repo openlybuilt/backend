@@ -4,6 +4,7 @@ import { AgentsClient } from "./agents-client.js";
 import type { RunRequest } from "./contracts.js";
 import { RunStore, type BackendRun } from "./store.js";
 import type { RunUpdate } from "./updates.js";
+import { workflowCleanupGraceMs } from "./timing.js";
 
 const terminal = new Set([
   "completed",
@@ -198,11 +199,12 @@ export class RunService {
       this.owned.delete(id);
       return;
     }
-    const cleanupGrace = current.workflow
-      ? 120000
-      : current.recordingStatus === "pending"
-        ? 60000
-        : 15000;
+    const cleanupGrace =
+      current.workflow || current.workflowId
+        ? workflowCleanupGraceMs
+        : current.recordingStatus === "pending"
+          ? 60000
+          : 15000;
     const expired =
       Date.now() >
       new Date(current.createdAt).getTime() + current.timeoutMs + cleanupGrace;
