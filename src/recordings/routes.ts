@@ -102,6 +102,11 @@ export async function recordingUpload(
       if (!/^video\/mp4(?:\s*;|$)/i.test(contentType))
         throw new BodyError(415, "MP4 content type required");
       const interrupt = () => request.destroy();
+      const disconnected = new AbortController();
+      const onResponseClose = () => {
+        if (!response.writableEnded) disconnected.abort();
+      };
+      response.once("close", onResponseClose);
       signal.addEventListener("abort", interrupt, { once: true });
       let saved;
       try {
@@ -111,9 +116,11 @@ export async function recordingUpload(
           request.iterator({ destroyOnReturn: false }),
           assertCurrent,
           interrupt,
+          AbortSignal.any([signal, disconnected.signal]),
         );
       } finally {
         signal.removeEventListener("abort", interrupt);
+        response.off("close", onResponseClose);
       }
       assertCurrent();
       send(

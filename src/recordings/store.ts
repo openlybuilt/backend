@@ -24,7 +24,51 @@ const columns =
   'status, browser_id AS "browserId", replay_id AS "replayId", COALESCE(byte_count,octet_length(video))::double precision AS bytes';
 
 export class RecordingStore {
+  private activeUploads = 0;
+  private readonly waitingUploads: {
+    signal: AbortSignal;
+    resolve: (release: () => void) => void;
+    reject: (reason: unknown) => void;
+    onAbort: () => void;
+  }[] = [];
+
   constructor(private readonly pool: pg.Pool) {}
+
+  private async acquireUpload(signal: AbortSignal): Promise<() => void> {
+    signal.throwIfAborted();
+    if (this.activeUploads < 4) {
+      this.activeUploads++;
+      return this.releaseUpload();
+    }
+    return new Promise((resolve, reject) => {
+      const entry = {
+        signal,
+        resolve,
+        reject,
+        onAbort: () => {
+          const index = this.waitingUploads.indexOf(entry);
+          if (index >= 0) this.waitingUploads.splice(index, 1);
+          reject(signal.reason);
+        },
+      };
+      this.waitingUploads.push(entry);
+      signal.addEventListener("abort", entry.onAbort, { once: true });
+      if (signal.aborted) entry.onAbort();
+    });
+  }
+
+  private releaseUpload(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = this.waitingUploads.shift();
+      if (next) {
+        next.signal.removeEventListener("abort", next.onAbort);
+        next.resolve(this.releaseUpload());
+      } else this.activeUploads--;
+    };
+  }
   async get(id: string): Promise<RecordingMetadata | undefined> {
     const result = await this.pool.query(
       `SELECT ${columns} FROM run_recordings WHERE run_id=$1`,
@@ -49,8 +93,21 @@ export class RecordingStore {
     source: AsyncIterable<Uint8Array>,
     assertCurrent: () => void,
     interrupt: () => void,
+    signal: AbortSignal,
   ): Promise<RecordingMetadata | undefined> {
-    const client = await this.pool.connect();
+    const assertUpload = () => {
+      signal.throwIfAborted();
+      assertCurrent();
+    };
+    const releaseUpload = await this.acquireUpload(signal);
+    let client: pg.PoolClient;
+    try {
+      assertUpload();
+      client = await this.pool.connect();
+    } catch (error) {
+      releaseUpload();
+      throw error;
+    }
     let broken = false;
     let failure: Error | undefined;
     const onError = (error: Error) => {
@@ -60,14 +117,14 @@ export class RecordingStore {
     };
     client.on("error", onError);
     try {
-      assertCurrent();
+      assertUpload();
       await client.query("BEGIN");
-      assertCurrent();
+      assertUpload();
       const existing = await client.query(
         `SELECT ${columns} FROM run_recordings WHERE run_id=$1`,
         [id],
       );
-      assertCurrent();
+      assertUpload();
       if (existing.rows[0]?.status !== "pending") {
         await client.query("ROLLBACK");
         return existing.rows[0] as RecordingMetadata | undefined;
@@ -79,17 +136,17 @@ export class RecordingStore {
         total = 0;
       const header = Buffer.alloc(16);
       const write = async () => {
-        assertCurrent();
+        assertUpload();
         await client.query(
           "INSERT INTO recording_chunks(run_id,upload_id,sequence,data) VALUES($1,$2,$3,$4)",
           [id, uploadId, sequence++, block.subarray(0, used)],
         );
-        assertCurrent();
+        assertUpload();
         block = Buffer.allocUnsafe(chunkBytes);
         used = 0;
       };
       for await (const value of recordingBody(source)) {
-        assertCurrent();
+        assertUpload();
         const data = Buffer.from(
           value.buffer,
           value.byteOffset,
@@ -111,7 +168,7 @@ export class RecordingStore {
           if (used === chunkBytes) await write();
         }
       }
-      assertCurrent();
+      assertUpload();
       if (
         total < 16 ||
         header.toString("ascii", 4, 8) !== "ftyp" ||
@@ -120,14 +177,14 @@ export class RecordingStore {
       )
         throw new InvalidRecordingError("Invalid MP4 recording");
       if (used) await write();
-      assertCurrent();
+      assertUpload();
       const saved = await client.query(
         `UPDATE run_recordings SET status='saved',video=NULL,byte_count=$2,upload_id=$3,updated_at=now() WHERE run_id=$1 AND status='pending' RETURNING ${columns}`,
         [id, total, uploadId],
       );
-      assertCurrent();
+      assertUpload();
       await client.query(saved.rowCount ? "COMMIT" : "ROLLBACK");
-      assertCurrent();
+      assertUpload();
       return (saved.rows[0] as RecordingMetadata | undefined) ?? this.get(id);
     } catch (error) {
       await client.query("ROLLBACK").catch(() => (broken = true));
@@ -135,6 +192,7 @@ export class RecordingStore {
     } finally {
       client.off("error", onError);
       client.release(broken);
+      releaseUpload();
     }
   }
   async *stream(
