@@ -5,6 +5,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { RecordingStore } from "./recordings/store.js";
+import { RecordingPreferences } from "./recordings/preferences.js";
 import { recordingPlayback, recordingUpload } from "./recordings/routes.js";
 import { EventStore, parseEventBatch } from "./runs/events.js";
 import { AgentsClient } from "./runs/agents-client.js";
@@ -45,6 +46,7 @@ const placeholders = new PlaceholderStore(
 );
 const events = new EventStore(store.pool);
 const recordings = new RecordingStore(store.pool);
+const recordingPreferences = new RecordingPreferences(store.pool);
 const runs = new RunService(
   store,
   new AgentsClient(
@@ -184,6 +186,39 @@ const server = createServer((request, response) => {
     }
     if (!identity) return send(response, 401, { error: "Unauthorized" });
     const workspaceId = await workspaces.getOrCreate(identity);
+    if (request.url === "/settings/recordings" && request.method === "GET")
+      return send(response, 200, {
+        enabled: await recordingPreferences.get(workspaceId),
+        stopping: await recordingPreferences.stopping(workspaceId),
+      });
+    if (request.url === "/settings/recordings" && request.method === "POST") {
+      if (
+        !/^application\/json(?:\s*;|$)/i.test(
+          request.headers["content-type"] ?? "",
+        )
+      )
+        return send(response, 415, { error: "JSON content type required" });
+      let body: unknown;
+      try {
+        body = await readJson(request);
+      } catch {
+        return send(response, 400, { error: "Invalid JSON" });
+      }
+      if (
+        !body ||
+        typeof body !== "object" ||
+        Array.isArray(body) ||
+        Object.keys(body).length !== 1 ||
+        typeof (body as { enabled?: unknown }).enabled !== "boolean"
+      )
+        return send(response, 400, { error: "Invalid recording preference" });
+      const enabled = (body as { enabled: boolean }).enabled;
+      await recordingPreferences.set(workspaceId, enabled);
+      return send(response, 200, {
+        enabled,
+        stopping: await recordingPreferences.stopping(workspaceId),
+      });
+    }
     if (request.method === "GET" && request.url === "/placeholders")
       return send(response, 200, await placeholders.list(workspaceId));
     if (request.method === "POST" && request.url === "/placeholders") {
@@ -239,6 +274,10 @@ const server = createServer((request, response) => {
       ))
     )
       return send(response, 404, { error: "Run not found" });
+    if (recordingMatch && request.method === "DELETE") {
+      await recordings.delete(recordingMatch[1]!.toLowerCase());
+      return send(response, 200, { deleted: true });
+    }
     if (await recordingPlayback(request, response, recordings)) return;
     const eventsMatch =
       /^\/runs\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/events$/i.exec(
@@ -392,6 +431,7 @@ const server = createServer((request, response) => {
                 "maxSteps",
                 "timeoutMs",
                 "acknowledgeSecretExposure",
+                "recordingEnabled",
               ].includes(key),
           ) ||
           typeof body.version !== "number" ||
@@ -446,6 +486,7 @@ const server = createServer((request, response) => {
             instruction: "Guided workflow",
             maxSteps: body.maxSteps,
             timeoutMs: body.timeoutMs,
+            recordingEnabled: body.recordingEnabled,
           });
           resolved = resolveWorkflow(version.definition, resolvedInputs.values);
           if (body.timeoutMs === undefined)

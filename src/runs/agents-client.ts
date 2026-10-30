@@ -39,6 +39,9 @@ export class AgentsClient {
             instruction: body.instruction,
             maxSteps: body.maxSteps,
             timeoutMs: body.timeoutMs,
+            ...(body.recordingEnabled === false
+              ? { recordingEnabled: false }
+              : {}),
             ...(body.workflow ? { workflow: body.workflow } : {}),
           })
         : undefined,

@@ -11,6 +11,7 @@ export type RunRequest = {
   workspaceId?: string;
   requestFingerprint?: string;
   containsSecrets?: boolean;
+  recordingEnabled?: boolean;
 };
 export type RunRecord = RunRequest & {
   status: string;
@@ -26,7 +27,14 @@ export function parseRun(value: unknown): RunRequest {
   const r = value as Record<string, unknown>;
   if (
     Object.keys(r).some(
-      (key) => !["id", "instruction", "maxSteps", "timeoutMs"].includes(key),
+      (key) =>
+        ![
+          "id",
+          "instruction",
+          "maxSteps",
+          "timeoutMs",
+          "recordingEnabled",
+        ].includes(key),
     )
   )
     throw new Error("Unknown run field");
@@ -59,7 +67,13 @@ export function parseRun(value: unknown): RunRequest {
     timeoutMs > 600000
   )
     throw new Error("Invalid timeoutMs");
+  if (
+    r.recordingEnabled !== undefined &&
+    typeof r.recordingEnabled !== "boolean"
+  )
+    throw new Error("Invalid recordingEnabled");
   return {
+    recordingEnabled: r.recordingEnabled !== false,
     id: r.id.toLowerCase(),
     instruction: r.instruction,
     maxSteps,
