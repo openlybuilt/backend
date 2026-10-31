@@ -122,7 +122,7 @@ const server = createServer((request, response) => {
       () => {
         if (!request.complete) request.destroy();
       },
-      isRecordingUpload ? 11 * 60 * 1000 : 5 * 60 * 1000,
+      isRecordingUpload ? 61 * 60 * 1000 : 5 * 60 * 1000,
     );
     receiveDeadline.unref();
     request.once("end", () => clearTimeout(receiveDeadline));
@@ -793,7 +793,7 @@ const server = createServer((request, response) => {
     })
     .finally(() => releaseAccount?.());
 });
-// Node defaults to five minutes for request bodies; recording transfers may take ten.
+// Node defaults to five minutes for request bodies; recording transfers may take an hour.
 server.requestTimeout = workflowCleanupGraceMs;
 server.listen(Number(rawPort), "127.0.0.1", () =>
   console.log(`Backend listening on 127.0.0.1:${rawPort}`),
