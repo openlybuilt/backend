@@ -254,11 +254,25 @@ const server = createServer((request, response) => {
         identityClient.verify(authorization[1]!),
       );
     } catch {
-      return send(response, 503, {
-        error: "Identity verification unavailable",
-      });
+      return request.method === "GET" && request.url === "/app-availability"
+        ? send(response, 503, { status: "unavailable" })
+        : send(response, 503, { error: "Identity verification unavailable" });
     }
     if (!identity) return send(response, 401, { error: "Unauthorized" });
+    if (request.method === "GET" && request.url === "/app-availability") {
+      try {
+        const { executionTargets } = await whileReady(() =>
+          agents.capabilities(
+            AbortSignal.any([signal, AbortSignal.timeout(3000)]),
+          ),
+        );
+        if (!executionTargets.length)
+          return send(response, 503, { status: "unavailable" });
+        return send(response, 200, { status: "available", executionTargets });
+      } catch {
+        return send(response, 503, { status: "unavailable" });
+      }
+    }
     if (request.method === "GET" && request.url === "/capabilities") {
       try {
         return send(
@@ -783,7 +797,13 @@ const server = createServer((request, response) => {
       if (isDatabaseFailure(error)) database.unavailable();
       const unavailable =
         error instanceof DatabaseUnavailableError || !database.ready;
-      if (!response.headersSent)
+      if (
+        request.method === "GET" &&
+        request.url === "/app-availability" &&
+        !response.headersSent
+      )
+        send(response, 503, { status: "unavailable" });
+      else if (!response.headersSent)
         send(response, unavailable ? 503 : 500, {
           error: unavailable
             ? "Database is currently unavailable"

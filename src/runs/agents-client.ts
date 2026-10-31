@@ -23,10 +23,14 @@ export class AgentsClient {
     )
       throw new Error("AGENTS_URL must be a loopback HTTP origin");
   }
-  async capabilities(): Promise<{ executionTargets: ExecutionTarget[] }> {
+  async capabilities(
+    signal?: AbortSignal,
+  ): Promise<{ executionTargets: ExecutionTarget[] }> {
     const response = await fetch(new URL("/capabilities", this.base), {
       headers: { authorization: `Bearer ${this.token}` },
-      signal: AbortSignal.timeout(10000),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(10000)])
+        : AbortSignal.timeout(10000),
       redirect: "error",
     });
     if (!response.ok || !response.body) {
