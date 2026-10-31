@@ -141,7 +141,15 @@ const server = createServer((request, response) => {
         return send(response, 401, { error: "Unauthorized" });
     }
 
-    if (await recordingUpload(request, response, recordings, assertCurrent))
+    if (
+      await recordingUpload(
+        request,
+        response,
+        recordings,
+        assertCurrent,
+        signal,
+      )
+    )
       return;
 
     const internalEvents =
@@ -652,18 +660,7 @@ const server = createServer((request, response) => {
             recordingEnabled: body.recordingEnabled,
           });
           resolved = resolveWorkflow(version.definition, resolvedInputs.values);
-          if (body.timeoutMs === undefined)
-            input.timeoutMs = Math.min(
-              600000,
-              input.timeoutMs +
-                Math.ceil(
-                  resolved.steps.reduce(
-                    (total, step) =>
-                      total + (step.type === "wait" ? step.seconds * 1000 : 0),
-                    0,
-                  ),
-                ),
-            );
+          if (body.timeoutMs === undefined) input.timeoutMs = 3600000;
         } catch (error) {
           return send(response, 400, {
             error: resolvedInputs.secretNames.length

@@ -1,5 +1,6 @@
+import { once } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { RecordingStore, maxRecordingBytes } from "./store.js";
+import { InvalidRecordingError, RecordingStore } from "./store.js";
 
 const runId =
   "([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})";
@@ -45,6 +46,7 @@ export async function recordingUpload(
   response: ServerResponse,
   recordings: RecordingStore,
   assertCurrent: () => void,
+  signal: AbortSignal,
 ): Promise<boolean> {
   const match = new RegExp(
     `^/internal/runs/${runId}/recording(/status)?$`,
@@ -99,16 +101,27 @@ export async function recordingUpload(
       }
       if (!/^video\/mp4(?:\s*;|$)/i.test(contentType))
         throw new BodyError(415, "MP4 content type required");
-      const video = await readBody(request, maxRecordingBytes);
-      assertCurrent();
-      if (
-        video.length < 16 ||
-        video.toString("ascii", 4, 8) !== "ftyp" ||
-        video.readUInt32BE(0) < 16 ||
-        video.readUInt32BE(0) > video.length
-      )
-        throw new BodyError(400, "Invalid MP4 recording");
-      const saved = await recordings.save(id, video);
+      const interrupt = () => request.destroy();
+      const disconnected = new AbortController();
+      const onResponseClose = () => {
+        if (!response.writableEnded) disconnected.abort();
+      };
+      response.once("close", onResponseClose);
+      signal.addEventListener("abort", interrupt, { once: true });
+      let saved;
+      try {
+        assertCurrent();
+        saved = await recordings.upload(
+          id,
+          request.iterator({ destroyOnReturn: false }),
+          assertCurrent,
+          interrupt,
+          AbortSignal.any([signal, disconnected.signal]),
+        );
+      } finally {
+        signal.removeEventListener("abort", interrupt);
+        response.off("close", onResponseClose);
+      }
       assertCurrent();
       send(
         response,
@@ -117,6 +130,11 @@ export async function recordingUpload(
       );
     }
   } catch (error) {
+    if (error instanceof InvalidRecordingError) {
+      request.resume();
+      send(response, 400, { error: error.message });
+      return true;
+    }
     if (!(error instanceof BodyError)) throw error;
     request.resume();
     send(response, error.status, { error: error.message });
@@ -175,24 +193,38 @@ export async function recordingPlayback(
       return true;
     }
   }
-  const video =
-    request.method === "HEAD"
-      ? undefined
-      : await recordings.read(id, start, end - start + 1);
-  assertCurrent();
-  if (request.method !== "HEAD" && !video) {
-    send(response, 404, { error: "Recording not available" });
-    return true;
+  const controller = new AbortController();
+  const closed = () => controller.abort();
+  response.once("close", closed);
+  try {
+    const video =
+      request.method === "HEAD"
+        ? undefined
+        : recordings.stream(id, start, end - start + 1, assertCurrent);
+    const first = await video?.next();
+    assertCurrent();
+    controller.signal.throwIfAborted();
+    response.writeHead(range === undefined ? 200 : 206, {
+      "content-type": "video/mp4",
+      "content-length": end - start + 1,
+      "accept-ranges": "bytes",
+      "cache-control": "private, no-store",
+      ...(range === undefined
+        ? {}
+        : { "content-range": `bytes ${start}-${end}/${size}` }),
+    });
+    const write = async (data: Buffer) => {
+      assertCurrent();
+      controller.signal.throwIfAborted();
+      if (!response.write(data))
+        await once(response, "drain", { signal: controller.signal });
+    };
+    if (first?.value) await write(first.value);
+    if (video) for await (const data of video) await write(data);
+    assertCurrent();
+    response.end();
+  } finally {
+    response.off("close", closed);
   }
-  response.writeHead(range === undefined ? 200 : 206, {
-    "content-type": "video/mp4",
-    "content-length": end - start + 1,
-    "accept-ranges": "bytes",
-    "cache-control": "private, no-store",
-    ...(range === undefined
-      ? {}
-      : { "content-range": `bytes ${start}-${end}/${size}` }),
-  });
-  response.end(video);
   return true;
 }

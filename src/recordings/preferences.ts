@@ -34,7 +34,11 @@ export class RecordingPreferences {
           [workspaceId],
         );
         await client.query(
-          `INSERT INTO run_recordings (run_id,status) SELECT id,'deleted' FROM backend_runs WHERE workspace_id=$1 AND recording_stop_requested ON CONFLICT (run_id) DO UPDATE SET status='deleted',video=NULL,updated_at=now()`,
+          `INSERT INTO run_recordings (run_id,status) SELECT id,'deleted' FROM backend_runs WHERE workspace_id=$1 AND recording_stop_requested ON CONFLICT (run_id) DO UPDATE SET status='deleted',video=NULL,byte_count=NULL,upload_id=NULL,updated_at=now()`,
+          [workspaceId],
+        );
+        await client.query(
+          "DELETE FROM recording_chunks WHERE run_id IN (SELECT id FROM backend_runs WHERE workspace_id=$1 AND recording_stop_requested)",
           [workspaceId],
         );
       }

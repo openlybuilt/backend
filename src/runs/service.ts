@@ -198,7 +198,11 @@ export class RunService {
       this.owned.delete(id);
       return;
     }
-    const cleanupGrace = current.recordingStatus === "pending" ? 60000 : 15000;
+    const cleanupGrace = current.workflow
+      ? 120000
+      : current.recordingStatus === "pending"
+        ? 60000
+        : 15000;
     const expired =
       Date.now() >
       new Date(current.createdAt).getTime() + current.timeoutMs + cleanupGrace;
