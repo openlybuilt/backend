@@ -18,6 +18,7 @@ import { parseRun } from "./runs/contracts.js";
 import { parseUpdate } from "./runs/updates.js";
 import { RunService } from "./runs/service.js";
 import { RunStore } from "./runs/store.js";
+import { workflowCleanupGraceMs } from "./runs/timing.js";
 import { WorkflowStore } from "./workflows/store.js";
 import { parseDefinition, resolveWorkflow } from "./workflows/definition.js";
 import { IdentityClient } from "./identity/client.js";
@@ -113,6 +114,21 @@ async function readJson(
   }
 }
 const server = createServer((request, response) => {
+  if (["POST", "PUT", "PATCH"].includes(request.method ?? "")) {
+    const isRecordingUpload =
+      request.method === "POST" &&
+      /^\/internal\/runs\/[0-9a-f-]{36}\/recording$/i.test(request.url ?? "");
+    const receiveDeadline = setTimeout(
+      () => {
+        if (!request.complete) request.destroy();
+      },
+      isRecordingUpload ? 61 * 60 * 1000 : 5 * 60 * 1000,
+    );
+    receiveDeadline.unref();
+    request.once("end", () => clearTimeout(receiveDeadline));
+    request.once("close", () => clearTimeout(receiveDeadline));
+    response.once("close", () => clearTimeout(receiveDeadline));
+  }
   let releaseAccount: (() => void) | undefined;
   void (async () => {
     if (request.method === "GET" && request.url === "/health")
@@ -777,6 +793,8 @@ const server = createServer((request, response) => {
     })
     .finally(() => releaseAccount?.());
 });
+// Node defaults to five minutes for request bodies; recording transfers may take an hour.
+server.requestTimeout = workflowCleanupGraceMs;
 server.listen(Number(rawPort), "127.0.0.1", () =>
   console.log(`Backend listening on 127.0.0.1:${rawPort}`),
 );

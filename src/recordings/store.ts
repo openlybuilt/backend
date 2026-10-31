@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
+import { workflowCleanupGraceMs } from "../runs/timing.js";
 
 const chunkBytes = 1024 * 1024;
 export class InvalidRecordingError extends Error {}
@@ -260,7 +261,8 @@ export class RecordingStore {
       `WITH expired AS (UPDATE run_recordings SET status='deleted',video=NULL,byte_count=NULL,upload_id=NULL,updated_at=now() WHERE status='saved' AND updated_at <= now()-interval '30 days' RETURNING run_id) DELETE FROM recording_chunks WHERE run_id IN (SELECT run_id FROM expired)`,
     );
     await this.pool.query(
-      "UPDATE run_recordings r SET status='failed',updated_at=now() FROM backend_runs b WHERE r.run_id=b.id AND r.status='pending' AND ((b.status IN ('completed','failed','cancelled','interrupted','outcome_unknown') AND b.updated_at < now()-interval '120 seconds') OR b.created_at + (b.timeout_ms+180000)*interval '1 millisecond' < now())",
+      "UPDATE run_recordings r SET status='failed',updated_at=now() FROM backend_runs b WHERE r.run_id=b.id AND r.status='pending' AND ((b.status IN ('completed','failed','cancelled','interrupted','outcome_unknown') AND b.updated_at + $1*interval '1 millisecond' < now()) OR b.created_at + (b.timeout_ms+$1)*interval '1 millisecond' < now())",
+      [workflowCleanupGraceMs],
     );
   }
 }
