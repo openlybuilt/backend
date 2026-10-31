@@ -199,9 +199,10 @@ export class RunService {
       this.owned.delete(id);
       return;
     }
-    const cleanupGrace =
-      current.workflow || current.workflowId
-        ? workflowCleanupGraceMs
+    const cleanupGrace = current.recordingEnabled
+      ? workflowCleanupGraceMs
+      : current.workflow || current.workflowId
+        ? 12 * 60 * 1000
         : current.recordingStatus === "pending"
           ? 60000
           : 15000;
