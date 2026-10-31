@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { readFile } from "node:fs/promises";
-import pg from "pg";
+import type pg from "pg";
 import type { RunRecord, RunRequest } from "./contracts.js";
 
 export type BackendRun = RunRecord & {
@@ -49,23 +49,8 @@ function withRecordingStatus<T extends WorkflowRun>(record: T): T {
 }
 
 export class RunStore {
-  readonly pool: pg.Pool;
-  private readonly lock: pg.Client;
-  constructor(url: string) {
-    this.pool = new pg.Pool({ connectionString: url });
-    this.lock = new pg.Client({ connectionString: url });
-    this.lock.on("error", () => {
-      console.error("Database ownership connection lost");
-      process.exit(1);
-    });
-  }
+  constructor(readonly pool: pg.Pool) {}
   async initialize(): Promise<void> {
-    await this.lock.connect();
-    const lock = await this.lock.query(
-      "SELECT pg_try_advisory_lock(78422117) AS acquired",
-    );
-    if (!lock.rows[0].acquired)
-      throw new Error("Another backend service owns this database");
     const sql = await readFile(
       new URL("../../migrations/001_backend_runs.sql", import.meta.url),
       "utf8",
@@ -255,11 +240,23 @@ export class RunStore {
     );
     return result.rowCount === 1;
   }
-  async activeIds(): Promise<string[]> {
+  async activeIds(includePending = false): Promise<string[]> {
     const result = await this.pool.query(
-      "SELECT id FROM backend_runs WHERE status IN ('dispatch_unknown','provisioning','running','cleaning_up','cancelling')",
+      "SELECT id FROM backend_runs WHERE status IN ('dispatch_unknown','provisioning','running','cleaning_up','cancelling') OR ($1::boolean AND status='dispatch_pending')",
+      [includePending],
     );
     return result.rows.map((row: { id: string }) => row.id);
+  }
+  async interrupt(ids: string[]): Promise<void> {
+    await this.pool.query(
+      `WITH interrupted AS (
+        UPDATE backend_runs SET status='interrupted',cancel_requested=true,
+        result='{"status":"interrupted","message":"Execution interrupted by database outage","cleanupError":"Cleanup could not be confirmed after database outage"}'::jsonb,
+        live_view_url=NULL,updated_at=now()
+        WHERE id=ANY($1::uuid[]) AND status NOT IN ('completed','failed','cancelled','interrupted','outcome_unknown') RETURNING id
+      ) UPDATE run_recordings SET status='failed',updated_at=now() WHERE run_id IN (SELECT id FROM interrupted) AND status='pending'`,
+      [ids],
+    );
   }
   async update(
     id: string,
@@ -303,9 +300,5 @@ export class RunStore {
         liveViewUrl !== undefined,
       ],
     );
-  }
-  async close(): Promise<void> {
-    await this.pool.end();
-    await this.lock.end();
   }
 }

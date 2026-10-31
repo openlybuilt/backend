@@ -58,6 +58,7 @@ export class AgentsClient {
     path: string,
     method: "GET" | "POST",
     body?: RunRequest,
+    signal?: AbortSignal,
   ): Promise<AgentRun | undefined> {
     const response = await fetch(new URL(path, this.base), {
       method,
@@ -77,7 +78,10 @@ export class AgentsClient {
             ...(body.workflow ? { workflow: body.workflow } : {}),
           })
         : undefined,
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.any([
+        AbortSignal.timeout(10000),
+        ...(signal ? [signal] : []),
+      ]),
       redirect: "error",
     });
     if (response.status === 404) return undefined;
