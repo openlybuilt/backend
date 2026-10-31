@@ -48,6 +48,7 @@ const placeholders = new PlaceholderStore(
 const events = new EventStore(store.pool);
 const recordings = new RecordingStore(store.pool);
 const recordingPreferences = new RecordingPreferences(store.pool);
+
 const agents = new AgentsClient(
   process.env.AGENTS_URL ?? "http://127.0.0.1:3100",
   process.env.AGENTS_API_TOKEN ?? "",
@@ -60,6 +61,7 @@ const accountDeletion = new AccountDeletionService(
   identityClient,
 );
 accountDeletion.start();
+
 runs.start();
 function send(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, {
@@ -191,6 +193,15 @@ const server = createServer((request, response) => {
       });
     }
     if (!identity) return send(response, 401, { error: "Unauthorized" });
+    if (request.method === "GET" && request.url === "/capabilities") {
+      try {
+        return send(response, 200, await agents.capabilities());
+      } catch {
+        return send(response, 503, {
+          error: "Execution capabilities unavailable",
+        });
+      }
+    }
     if (request.method === "GET" && request.url === "/account/deletion") {
       return send(response, 200, {
         status: (await accountDeletion.status(identity)) ?? "none",
