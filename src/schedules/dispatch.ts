@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { AccountGate } from "../accounts/deletion.js";
-import { Database } from "../database.js";
+import { Database, isDatabaseFailure } from "../database.js";
 import { PlaceholderStore } from "../placeholders/store.js";
 import { parseRun, type RunRequest } from "../runs/contracts.js";
 import { RunStore } from "../runs/store.js";
@@ -110,19 +110,43 @@ export async function reserveNext(
       "SELECT version,definition FROM workflow_versions WHERE workflow_id=$1 ORDER BY version DESC LIMIT 1",
       [schedule.workflow_id],
     );
-    if (!version.rows[0]) throw new Error("Workflow version missing");
-    const latest = version.rows[0];
-    const definition = parseDefinition(latest.definition);
-    const inputs = await placeholders.resolve(
-      schedule.workspace_id,
-      definition.inputs,
-      client,
-    );
+    let latest: { version: number; definition: unknown };
+    let definition: ReturnType<typeof parseDefinition>;
+    let inputs: Awaited<ReturnType<PlaceholderStore["resolve"]>>;
+    try {
+      if (!version.rows[0]) throw new Error("Workflow version missing");
+      latest = version.rows[0];
+      definition = parseDefinition(latest.definition);
+      inputs = await placeholders.resolve(
+        schedule.workspace_id,
+        definition.inputs,
+        client,
+      );
+    } catch (error) {
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      if (
+        isDatabaseFailure(error) ||
+        (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code))
+      )
+        throw error;
+      database.assertReady(signal);
+      await client.query(
+        "UPDATE workflow_schedules SET issue='invalid_workflow' WHERE id=$1",
+        [schedule.schedule_id],
+      );
+      await client.query("COMMIT");
+      release();
+      return undefined;
+    }
     if (inputs.missing.length) {
       await client.query(
         "UPDATE workflow_schedules SET issue='missing_placeholders',required_secret_names=$2 WHERE id=$1",
         [schedule.schedule_id, inputs.secretNames],
       );
+      database.assertReady(signal);
       await client.query("COMMIT");
       release();
       return undefined;
@@ -136,6 +160,7 @@ export async function reserveNext(
         "UPDATE workflow_schedules SET issue='secret_acknowledgment_required',required_secret_names=$2 WHERE id=$1",
         [schedule.schedule_id, inputs.secretNames],
       );
+      database.assertReady(signal);
       await client.query("COMMIT");
       release();
       return undefined;
@@ -148,6 +173,7 @@ export async function reserveNext(
         "UPDATE workflow_schedules SET issue='invalid_workflow' WHERE id=$1",
         [schedule.schedule_id],
       );
+      database.assertReady(signal);
       await client.query("COMMIT");
       release();
       return undefined;
