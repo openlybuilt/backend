@@ -102,6 +102,23 @@ export class RunService {
     this.dispatches.set(request.id, task);
     return task;
   }
+  async dispatchPrepared(request: RunRequest): Promise<BackendRun> {
+    const signal = this.database.signal;
+    this.database.assertReady(signal);
+    const current = await this.store.get(request.id);
+    this.database.assertReady(signal);
+    if (!current) throw new Error("Run missing");
+    if (!terminal.has(current.status)) this.owned.add(request.id);
+    const pending = this.dispatches.get(request.id);
+    if (pending) return pending;
+    if (current.status !== "dispatch_pending" || current.cancelRequested)
+      return current;
+    const task = this.dispatch(request, signal).finally(() => {
+      this.dispatches.delete(request.id);
+    });
+    this.dispatches.set(request.id, task);
+    return task;
+  }
   private async dispatch(
     request: RunRequest,
     signal: AbortSignal,
