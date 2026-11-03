@@ -1,8 +1,10 @@
 export type ScheduleInput = {
   idempotencyKey: string;
-  kind: "once" | "interval";
+  kind: "once" | "interval" | "weekly";
   runAt?: string;
   intervalMinutes?: number;
+  weekdays?: number[];
+  localTime?: string;
   recordingEnabled: boolean;
   acknowledgeSecretExposure: boolean;
   acknowledgedWorkflowVersion?: number;
@@ -61,6 +63,8 @@ export function parseSchedule(value: unknown): ScheduleInput {
     "kind",
     "runAt",
     "intervalMinutes",
+    "weekdays",
+    "localTime",
     "recordingEnabled",
     "acknowledgeSecretExposure",
     "acknowledgedWorkflowVersion",
@@ -100,11 +104,18 @@ export function parseSchedule(value: unknown): ScheduleInput {
       ? {}
       : { acknowledgedWorkflowVersion: version as number }),
   };
-  if (body.kind === "once" && body.intervalMinutes === undefined)
+  if (
+    body.kind === "once" &&
+    body.intervalMinutes === undefined &&
+    body.weekdays === undefined &&
+    body.localTime === undefined
+  )
     return { ...common, kind: "once", runAt: parseInstant(body.runAt) };
   if (
     body.kind === "interval" &&
     body.runAt === undefined &&
+    body.weekdays === undefined &&
+    body.localTime === undefined &&
     Number.isInteger(body.intervalMinutes) &&
     (body.intervalMinutes as number) >= 1 &&
     (body.intervalMinutes as number) <= 525600
@@ -113,6 +124,26 @@ export function parseSchedule(value: unknown): ScheduleInput {
       ...common,
       kind: "interval",
       intervalMinutes: body.intervalMinutes as number,
+    };
+  if (
+    body.kind === "weekly" &&
+    body.runAt === undefined &&
+    body.intervalMinutes === undefined &&
+    Array.isArray(body.weekdays) &&
+    body.weekdays.length >= 1 &&
+    body.weekdays.length <= 7 &&
+    body.weekdays.every(
+      (day) => Number.isInteger(day) && day >= 0 && day <= 6,
+    ) &&
+    new Set(body.weekdays).size === body.weekdays.length &&
+    typeof body.localTime === "string" &&
+    /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(body.localTime)
+  )
+    return {
+      ...common,
+      kind: "weekly",
+      weekdays: [...body.weekdays].sort(),
+      localTime: body.localTime,
     };
   throw new Error("Invalid schedule");
 }
