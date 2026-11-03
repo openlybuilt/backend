@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS workflow_schedules (
   enabled boolean NOT NULL DEFAULT true,
   recording_enabled boolean NOT NULL DEFAULT true,
   approved_secret_names text[] NOT NULL DEFAULT '{}',
+  required_secret_names text[] NOT NULL DEFAULT '{}',
   next_run_at timestamptz,
   issue text,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -21,6 +22,14 @@ CREATE INDEX IF NOT EXISTS workflow_schedules_workspace_workflow_idx
   ON workflow_schedules(workspace_id, workflow_id);
 CREATE INDEX IF NOT EXISTS workflow_schedules_due_idx
   ON workflow_schedules(next_run_at) WHERE enabled AND next_run_at IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS schedule_creation_requests (
+  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  creation_key uuid NOT NULL,
+  fingerprint text NOT NULL,
+  schedule_id uuid REFERENCES workflow_schedules(id) ON DELETE SET NULL,
+  PRIMARY KEY (workspace_id, creation_key)
+);
 
 CREATE TABLE IF NOT EXISTS schedule_occurrences (
   id uuid PRIMARY KEY,
