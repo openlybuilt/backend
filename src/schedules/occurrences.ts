@@ -8,6 +8,37 @@ type Due = {
   interval_minutes: number | null;
   next_run_at: Date;
 };
+export async function recoverReservations(
+  pool: pg.Pool,
+  database: Database,
+  signal: AbortSignal,
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    database.assertReady(signal);
+    await client.query("BEGIN");
+    // No agent call is made until beginDispatch changes this state.
+    await client.query(`DELETE FROM backend_runs b USING schedule_occurrences o
+      WHERE o.run_id=b.id AND o.status='dispatching' AND b.status='dispatch_pending'`);
+    await client.query(`UPDATE schedule_occurrences o SET status='queued',run_id=NULL
+      WHERE o.status='dispatching' AND NOT EXISTS (SELECT 1 FROM backend_runs b WHERE b.id=o.run_id)`);
+    // A completed callback is conclusive even if the scheduler's acknowledgement was lost.
+    await client.query(`UPDATE schedule_occurrences o SET status='started'
+      FROM backend_runs b WHERE o.status='dispatching' AND o.run_id=b.id AND b.status IN ('completed','failed','cancelled')`);
+    await client.query(`WITH uncertain AS (
+      UPDATE schedule_occurrences o SET status='outcome_unknown',reason='dispatch_unknown'
+      FROM backend_runs b WHERE o.status='dispatching' AND o.run_id=b.id AND b.status<>'dispatch_pending'
+      RETURNING o.schedule_id)
+      UPDATE workflow_schedules s SET issue='dispatch_unknown' FROM uncertain u WHERE s.id=u.schedule_id`);
+    database.assertReady(signal);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 export async function materializeDue(
   pool: pg.Pool,
   database: Database,

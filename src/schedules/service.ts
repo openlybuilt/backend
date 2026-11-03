@@ -4,7 +4,7 @@ import { PlaceholderStore } from "../placeholders/store.js";
 import { RunService } from "../runs/service.js";
 import { RunStore } from "../runs/store.js";
 import { reserveNext } from "./dispatch.js";
-import { materializeDue } from "./occurrences.js";
+import { materializeDue, recoverReservations } from "./occurrences.js";
 
 export class ScheduleService {
   private timer?: ReturnType<typeof setInterval>;
@@ -44,14 +44,9 @@ export class ScheduleService {
     if (this.epoch !== signal) {
       this.epoch = signal;
       this.boundary = new Date();
-      // A request that passed beginDispatch may have reached the agent; do not retry it.
-      await this.store.pool.query(`WITH uncertain AS (
-        UPDATE schedule_occurrences o SET status='outcome_unknown',reason='dispatch_unknown'
-        FROM backend_runs b WHERE o.status='dispatching' AND o.run_id=b.id AND b.status<>'dispatch_pending'
-        RETURNING o.schedule_id)
-        UPDATE workflow_schedules s SET issue='dispatch_unknown' FROM uncertain u WHERE s.id=u.schedule_id`);
-      this.database.assertReady(signal);
     }
+    // Only one sweep runs at a time; any leftover reservation is no longer in flight here.
+    await recoverReservations(this.store.pool, this.database, signal);
     await materializeDue(this.store.pool, this.database, this.boundary, signal);
     for (let i = 0; i < 50; i++) {
       this.database.assertReady(signal);
