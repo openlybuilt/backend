@@ -106,13 +106,14 @@ export class PlaceholderStore {
   async resolve(
     workspace: string,
     names: string[],
+    client?: pg.PoolClient,
   ): Promise<{
     values: Record<string, string>;
     secretNames: string[];
     missing: string[];
   }> {
-    const rows = await this.pool.query<Row>(
-      "SELECT name,secret,ciphertext,nonce,tag FROM placeholders WHERE workspace_id=$1 AND name=ANY($2::text[])",
+    const rows = await (client ?? this.pool).query<Row>(
+      `SELECT name,secret,ciphertext,nonce,tag FROM placeholders WHERE workspace_id=$1 AND name=ANY($2::text[])${client ? " FOR SHARE" : ""}`,
       [workspace, names],
     );
     const values: Record<string, string> = Object.create(null),
