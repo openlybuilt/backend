@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { parseDefinition, resolveWorkflow } from "../workflows/definition.js";
 import type { PlaceholderStore } from "../placeholders/store.js";
+import { isDatabaseFailure } from "../database.js";
 import type { ScheduleInput } from "./contracts.js";
 
 export class ScheduleConflict extends Error {
@@ -125,8 +126,20 @@ export class ScheduleStore {
       "SELECT version,definition FROM workflow_versions WHERE workflow_id=$1 ORDER BY version DESC LIMIT 1",
       [workflowId],
     );
-    if (!version.rows[0]) throw new Error("Workflow not found");
-    const definition = parseDefinition(version.rows[0].definition);
+    if (!version.rows[0])
+      throw new ScheduleConflict(
+        "invalid_workflow",
+        "Fix the workflow before resuming.",
+      );
+    let definition: ReturnType<typeof parseDefinition>;
+    try {
+      definition = parseDefinition(version.rows[0].definition);
+    } catch {
+      throw new ScheduleConflict(
+        "invalid_workflow",
+        "Fix the workflow before resuming.",
+      );
+    }
     const secrets = await client.query<{ name: string; secret: boolean }>(
       "SELECT name,secret FROM placeholders WHERE workspace_id=$1 AND name=ANY($2::text[]) ORDER BY name FOR SHARE",
       [workspaceId, definition.inputs],
@@ -145,11 +158,28 @@ export class ScheduleStore {
     workspaceId: string,
     definition: ReturnType<typeof parseDefinition>,
   ) {
-    const values = await this.placeholders.resolve(
-      workspaceId,
-      definition.inputs,
-      client,
-    );
+    let values: Awaited<ReturnType<PlaceholderStore["resolve"]>>;
+    try {
+      values = await this.placeholders.resolve(
+        workspaceId,
+        definition.inputs,
+        client,
+      );
+    } catch (error) {
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      if (
+        isDatabaseFailure(error) ||
+        (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code))
+      )
+        throw error;
+      throw new ScheduleConflict(
+        "invalid_workflow",
+        "Fix the workflow or its placeholder values before resuming.",
+      );
+    }
     if (values.missing.length)
       throw new ScheduleConflict(
         "missing_placeholders",
