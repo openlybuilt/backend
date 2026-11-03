@@ -145,10 +145,6 @@ export async function reserveNext(
       resolved = resolveWorkflow(definition, inputs.values);
     } catch {
       await client.query(
-        "UPDATE schedule_occurrences SET status='failed',reason='invalid_workflow' WHERE id=$1",
-        [item.id],
-      );
-      await client.query(
         "UPDATE workflow_schedules SET issue='invalid_workflow' WHERE id=$1",
         [schedule.schedule_id],
       );
