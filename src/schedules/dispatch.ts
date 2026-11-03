@@ -17,7 +17,7 @@ type QueueRow = {
   schedule_id: string;
   workflow_id: string;
   workspace_id: string;
-  kind: "once" | "interval";
+  kind: "once" | "interval" | "weekly";
   recording_enabled: boolean;
   approved_secret_names: string[];
   enabled: boolean;
@@ -42,7 +42,7 @@ export async function reserveNext(
     JOIN workflow_schedules s ON s.id=o.schedule_id JOIN workspaces w ON w.id=s.workspace_id JOIN identities i ON i.id=w.identity_id
     WHERE o.status='queued' AND s.enabled AND s.issue IS NULL
       AND NOT EXISTS (SELECT 1 FROM account_deletions d WHERE d.workspace_id=s.workspace_id)
-      AND (s.kind='once' OR NOT EXISTS (SELECT 1 FROM backend_runs b WHERE b.workflow_id=s.workflow_id AND b.workspace_id=s.workspace_id AND b.status NOT IN (${terminal})))
+      AND (s.kind IN ('once','weekly') OR NOT EXISTS (SELECT 1 FROM backend_runs b WHERE b.workflow_id=s.workflow_id AND b.workspace_id=s.workspace_id AND b.status NOT IN (${terminal})))
     ORDER BY o.scheduled_at,o.id LIMIT 1`);
   if (!candidate.rows.length) return undefined;
   const item = candidate.rows[0]!;
@@ -55,6 +55,9 @@ export async function reserveNext(
   try {
     database.assertReady(signal);
     await client.query("BEGIN");
+    await client.query("SELECT id FROM workspaces WHERE id=$1 FOR UPDATE", [
+      item.workspace_id,
+    ]);
     const found = await client.query<QueueRow>(
       `SELECT s.id AS schedule_id,s.workflow_id,s.workspace_id,s.kind,s.recording_enabled,s.approved_secret_names,s.enabled,s.issue,o.status
       FROM schedule_occurrences o JOIN workflow_schedules s ON s.id=o.schedule_id WHERE o.id=$1 FOR UPDATE OF s,o`,
@@ -71,9 +74,6 @@ export async function reserveNext(
       release();
       return undefined;
     }
-    await client.query("SELECT id FROM workspaces WHERE id=$1 FOR UPDATE", [
-      schedule.workspace_id,
-    ]);
     const deleted = await client.query(
       "SELECT 1 FROM account_deletions WHERE workspace_id=$1",
       [schedule.workspace_id],

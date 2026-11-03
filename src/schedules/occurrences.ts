@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
+import { nextWeekly } from "./weekly.js";
 import { Database } from "../database.js";
 
 type Due = {
   id: string;
-  kind: "once" | "interval";
+  kind: "once" | "interval" | "weekly";
   interval_minutes: number | null;
+  weekdays: number[] | null;
+  local_time: string | null;
+  timezone: string | null;
   next_run_at: Date;
 };
 export async function recoverReservations(
@@ -50,8 +54,8 @@ export async function materializeDue(
     database.assertReady(signal);
     await client.query("BEGIN");
     const result =
-      await client.query<Due>(`SELECT id,kind,interval_minutes,next_run_at FROM workflow_schedules
-      WHERE enabled AND issue IS NULL AND next_run_at<=now() ORDER BY next_run_at LIMIT 50 FOR UPDATE SKIP LOCKED`);
+      await client.query<Due>(`SELECT s.id,s.kind,s.interval_minutes,s.weekdays,s.local_time,s.next_run_at,w.timezone FROM workflow_schedules s JOIN workspaces w ON w.id=s.workspace_id
+      WHERE s.enabled AND s.issue IS NULL AND s.next_run_at<=now() ORDER BY s.next_run_at LIMIT 50 FOR UPDATE OF s SKIP LOCKED`);
     let budget = 500;
     for (const schedule of result.rows) {
       database.assertReady(signal);
@@ -74,7 +78,14 @@ export async function materializeDue(
         next =
           schedule.kind === "once"
             ? null
-            : new Date(next.getTime() + schedule.interval_minutes! * 60000);
+            : schedule.kind === "weekly"
+              ? nextWeekly(
+                  next,
+                  schedule.timezone!,
+                  schedule.weekdays!,
+                  schedule.local_time!,
+                )
+              : new Date(next.getTime() + schedule.interval_minutes! * 60000);
       }
       await client.query(
         "UPDATE workflow_schedules SET next_run_at=$2 WHERE id=$1",
