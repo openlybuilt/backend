@@ -123,6 +123,19 @@ export class RunStore {
       ),
     );
     await this.pool.query(
+      await readFile(
+        new URL("../../migrations/013_weekday_schedules.sql", import.meta.url),
+        "utf8",
+      ),
+    );
+    // These reservations never reached beginDispatch, so no agent request was sent.
+    await this.pool
+      .query(`DELETE FROM backend_runs b USING schedule_occurrences o
+      WHERE o.run_id=b.id AND o.status='dispatching' AND b.status='dispatch_pending'`);
+    await this.pool
+      .query(`UPDATE schedule_occurrences o SET status='queued',run_id=NULL
+      WHERE o.status='dispatching' AND NOT EXISTS (SELECT 1 FROM backend_runs b WHERE b.id=o.run_id)`);
+    await this.pool.query(
       "UPDATE backend_runs SET status = 'dispatch_unknown', updated_at = now() WHERE status = 'dispatch_pending'",
     );
   }
@@ -131,39 +144,7 @@ export class RunStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      const preference = await client.query(
-        "SELECT recordings_allowed FROM workspaces WHERE id=$1 FOR UPDATE",
-        [request.workspaceId],
-      );
-      if (!preference.rows[0]) throw new Error("Workspace not found");
-      request.recordingEnabled =
-        request.recordingEnabled !== false &&
-        preference.rows[0].recordings_allowed;
-      await client.query(
-        "INSERT INTO backend_runs (id, instruction, max_steps, timeout_ms, status,workflow,workflow_id,workflow_version,workflow_inputs,workspace_id,request_fingerprint,contains_secrets,recording_enabled) VALUES ($1,$2,$3,$4,'dispatch_pending',$5::jsonb,$6::uuid,$7::integer,$8::jsonb,$9::uuid,$10,$11,$12) ON CONFLICT (id) DO NOTHING",
-        [
-          request.id,
-          request.instruction,
-          request.maxSteps,
-          request.timeoutMs,
-          request.requestFingerprint
-            ? null
-            : request.workflow
-              ? JSON.stringify(request.workflow)
-              : null,
-          request.workflowId ?? null,
-          request.workflowVersion ?? null,
-          request.requestFingerprint
-            ? null
-            : request.workflowInputs
-              ? JSON.stringify(request.workflowInputs)
-              : null,
-          request.workspaceId,
-          request.requestFingerprint ?? null,
-          request.containsSecrets ?? false,
-          request.recordingEnabled !== false,
-        ],
-      );
+      await this.insert(request, client);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -171,6 +152,45 @@ export class RunStore {
     } finally {
       client.release();
     }
+    return this.verify(request);
+  }
+  async insert(request: RunRequest, client: pg.PoolClient): Promise<void> {
+    if (!request.workspaceId) throw new Error("Workspace is required");
+    const preference = await client.query(
+      "SELECT recordings_allowed FROM workspaces WHERE id=$1 FOR UPDATE",
+      [request.workspaceId],
+    );
+    if (!preference.rows[0]) throw new Error("Workspace not found");
+    request.recordingEnabled =
+      request.recordingEnabled !== false &&
+      preference.rows[0].recordings_allowed;
+    await client.query(
+      "INSERT INTO backend_runs (id, instruction, max_steps, timeout_ms, status,workflow,workflow_id,workflow_version,workflow_inputs,workspace_id,request_fingerprint,contains_secrets,recording_enabled) VALUES ($1,$2,$3,$4,'dispatch_pending',$5::jsonb,$6::uuid,$7::integer,$8::jsonb,$9::uuid,$10,$11,$12) ON CONFLICT (id) DO NOTHING",
+      [
+        request.id,
+        request.instruction,
+        request.maxSteps,
+        request.timeoutMs,
+        request.requestFingerprint
+          ? null
+          : request.workflow
+            ? JSON.stringify(request.workflow)
+            : null,
+        request.workflowId ?? null,
+        request.workflowVersion ?? null,
+        request.requestFingerprint
+          ? null
+          : request.workflowInputs
+            ? JSON.stringify(request.workflowInputs)
+            : null,
+        request.workspaceId,
+        request.requestFingerprint ?? null,
+        request.containsSecrets ?? false,
+        request.recordingEnabled !== false,
+      ],
+    );
+  }
+  private async verify(request: RunRequest): Promise<BackendRun> {
     const record = await this.get(request.id);
     if (!record) throw new Error("Run insert failed");
     const stored = await this.pool.query<{

@@ -3,6 +3,7 @@ import type pg from "pg";
 import { parseDefinition, resolveWorkflow } from "../workflows/definition.js";
 import type { PlaceholderStore } from "../placeholders/store.js";
 import { isDatabaseFailure } from "../database.js";
+import { nextWeekly } from "./weekly.js";
 import type { ScheduleInput } from "./contracts.js";
 
 export class ScheduleConflict extends Error {
@@ -18,9 +19,11 @@ type Row = {
   id: string;
   workflow_id: string;
   workspace_id: string;
-  kind: "once" | "interval";
+  kind: "once" | "interval" | "weekly";
   run_at: Date | null;
   interval_minutes: number | null;
+  weekdays: number[] | null;
+  local_time: string | null;
   enabled: boolean;
   recording_enabled: boolean;
   required_secret_names: string[];
@@ -44,6 +47,8 @@ function serialize(row: Row) {
     kind: row.kind,
     runAt: row.run_at?.toISOString() ?? null,
     intervalMinutes: row.interval_minutes,
+    weekdays: row.weekdays,
+    localTime: row.local_time,
     enabled: row.enabled,
     nextRunAt: row.next_run_at?.toISOString() ?? null,
     status: row.issue
@@ -87,12 +92,46 @@ export class ScheduleStore {
     timezone: string,
     onlyIfUnset = false,
   ): Promise<string> {
-    const result = await this.pool.query(
-      "UPDATE workspaces SET timezone=CASE WHEN $3 THEN COALESCE(timezone,$2) ELSE $2 END WHERE id=$1 RETURNING timezone",
-      [workspaceId, timezone, onlyIfUnset],
-    );
-    if (!result.rows.length) throw new Error("Workspace not found");
-    return result.rows[0].timezone as string;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const workspace = await client.query<{ timezone: string | null }>(
+        "SELECT timezone FROM workspaces WHERE id=$1 FOR UPDATE",
+        [workspaceId],
+      );
+      if (!workspace.rows.length) throw new Error("Workspace not found");
+      const schedules = await client.query<Row>(
+        "SELECT * FROM workflow_schedules WHERE workspace_id=$1 AND kind='weekly' ORDER BY id FOR UPDATE",
+        [workspaceId],
+      );
+      const result = await client.query(
+        "UPDATE workspaces SET timezone=CASE WHEN $3 THEN COALESCE(timezone,$2) ELSE $2 END WHERE id=$1 RETURNING timezone",
+        [workspaceId, timezone, onlyIfUnset],
+      );
+      if (!result.rows.length) throw new Error("Workspace not found");
+      const selected = result.rows[0].timezone as string;
+      if (selected !== workspace.rows[0]!.timezone) {
+        for (const schedule of schedules.rows) {
+          const next = nextWeekly(
+            new Date(),
+            selected,
+            schedule.weekdays!,
+            schedule.local_time!,
+          );
+          await client.query(
+            "UPDATE workflow_schedules SET next_run_at=$2 WHERE id=$1",
+            [schedule.id, next],
+          );
+        }
+      }
+      await client.query("COMMIT");
+      return selected;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
   async list(
     workspaceId: string,
@@ -267,9 +306,24 @@ export class ScheduleStore {
           "The workflow changed. Review the latest version.",
         );
       const id = randomUUID();
+      let weeklyNext: Date | null = null;
+      if (input.kind === "weekly") {
+        const zone = await client.query<{ timezone: string | null }>(
+          "SELECT timezone FROM workspaces WHERE id=$1",
+          [workspaceId],
+        );
+        if (!zone.rows[0]?.timezone)
+          throw new Error("Choose a time zone in Settings first");
+        weeklyNext = nextWeekly(
+          new Date(),
+          zone.rows[0].timezone,
+          input.weekdays!,
+          input.localTime!,
+        );
+      }
       await client.query(
-        `INSERT INTO workflow_schedules(id,workspace_id,workflow_id,kind,run_at,interval_minutes,recording_enabled,approved_secret_names,required_secret_names,next_run_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8,CASE WHEN $4='once' THEN $5::timestamptz ELSE now()+($6::integer * interval '1 minute') END)`,
+        `INSERT INTO workflow_schedules(id,workspace_id,workflow_id,kind,run_at,interval_minutes,recording_enabled,approved_secret_names,required_secret_names,next_run_at,weekdays,local_time)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8,CASE WHEN $4='once' THEN $5::timestamptz WHEN $4='weekly' THEN $9::timestamptz ELSE now()+($6::integer * interval '1 minute') END,$10,$11)`,
         [
           id,
           workspaceId,
@@ -279,6 +333,9 @@ export class ScheduleStore {
           input.intervalMinutes ?? null,
           input.recordingEnabled,
           current.names,
+          weeklyNext,
+          input.weekdays ?? null,
+          input.localTime ?? null,
         ],
       );
       await client.query(
@@ -397,6 +454,29 @@ export class ScheduleStore {
             "UPDATE workflow_schedules SET enabled=$2 WHERE id=$1",
             [id, input.enabled],
           );
+      }
+      if (
+        row.kind === "weekly" &&
+        (input.enabled === true || input.acknowledgeSecretExposure)
+      ) {
+        const zone = await client.query<{ timezone: string | null }>(
+          "SELECT timezone FROM workspaces WHERE id=$1",
+          [workspaceId],
+        );
+        if (!zone.rows[0]?.timezone)
+          throw new Error("Choose a time zone in Settings first");
+        await client.query(
+          "UPDATE workflow_schedules SET next_run_at=$2 WHERE id=$1",
+          [
+            id,
+            nextWeekly(
+              new Date(),
+              zone.rows[0].timezone,
+              row.weekdays!,
+              row.local_time!,
+            ),
+          ],
+        );
       }
       const saved = await client.query<Row>(`${select} WHERE s.id=$1`, [id]);
       await client.query("COMMIT");
