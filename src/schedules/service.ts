@@ -71,6 +71,11 @@ export class ScheduleService {
             UPDATE workflow_schedules s SET issue='dispatch_unknown' FROM updated u WHERE s.id=u.schedule_id`,
             [reserved.occurrenceId],
           );
+        } else if (run.status === "failed") {
+          await this.store.pool.query(
+            "UPDATE schedule_occurrences SET status='failed' WHERE id=$1 AND status='dispatching'",
+            [reserved.occurrenceId],
+          );
         } else {
           await this.store.pool.query(
             "UPDATE schedule_occurrences SET status='started' WHERE id=$1 AND status='dispatching'",
