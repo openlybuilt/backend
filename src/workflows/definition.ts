@@ -1,5 +1,5 @@
 export type ExecutionTarget = "browser" | "windows";
-export type ProviderId = "onkernel" | "daytona";
+export type ProviderId = string;
 export type WorkflowStep =
   | { type: "navigate"; url: string }
   | { type: "type"; text: string; target?: string; region?: string }
@@ -26,17 +26,11 @@ function parseExecutionTarget(value: unknown): ExecutionTarget {
   throw new Error("Invalid execution target");
 }
 
-function parseProvider(
-  value: unknown,
-  target: ExecutionTarget,
-): ProviderId | undefined {
+function parseProvider(value: unknown): ProviderId | undefined {
   if (value === undefined) return undefined;
-  if (
-    (value === "onkernel" && target === "browser") ||
-    (value === "daytona" && target === "windows")
-  )
+  if (typeof value === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(value))
     return value;
-  throw new Error("Provider is incompatible with the selected VM type");
+  throw new Error("Invalid provider identifier");
 }
 
 export function parseWorkflow(input: unknown): ResolvedWorkflow {
@@ -44,7 +38,7 @@ export function parseWorkflow(input: unknown): ResolvedWorkflow {
     throw new Error("Invalid workflow");
   const value = input as Record<string, unknown>;
   const executionTarget = parseExecutionTarget(value.executionTarget);
-  const provider = parseProvider(value.provider, executionTarget);
+  const provider = parseProvider(value.provider);
   if (
     Object.keys(value).some(
       (key) => !["steps", "executionTarget", "provider"].includes(key),
@@ -254,7 +248,7 @@ export function parseDefinition(input: unknown): WorkflowDefinition {
     throw new Error("Invalid workflow definition");
   const value = input as Record<string, unknown>;
   const executionTarget = parseExecutionTarget(value.executionTarget);
-  const provider = parseProvider(value.provider, executionTarget);
+  const provider = parseProvider(value.provider);
   if (
     Object.keys(value).some(
       (key) =>

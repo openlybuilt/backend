@@ -88,32 +88,41 @@ export class AgentsClient {
       throw new Error("Invalid provider capabilities");
     const data = value as Record<string, unknown>;
     if (
-      Object.keys(data).length !== 1 ||
+      Object.keys(data).length > 16 ||
       !Array.isArray(data.providers) ||
-      data.providers.length > 2
+      data.providers.length > 32
     )
       throw new Error("Invalid provider capabilities");
     const providers: ProviderCapability[] = [];
+    const seen = new Set<string>();
     for (const item of data.providers) {
       if (!item || typeof item !== "object" || Array.isArray(item))
         throw new Error("Invalid provider capabilities");
       const entry = item as Record<string, unknown>;
       if (
-        Object.keys(entry).length !== 2 ||
+        Object.keys(entry).length > 16 ||
+        typeof entry.id !== "string" ||
+        !/^[a-z][a-z0-9-]{0,63}$/.test(entry.id) ||
+        seen.has(entry.id) ||
         !Array.isArray(entry.executionTargets) ||
-        entry.executionTargets.length !== 1 ||
-        !(
-          (entry.id === "onkernel" &&
-            entry.executionTargets[0] === "browser") ||
-          (entry.id === "daytona" && entry.executionTargets[0] === "windows")
-        ) ||
-        providers.some((previous) => previous.id === entry.id)
+        entry.executionTargets.length < 1 ||
+        entry.executionTargets.length > 16 ||
+        new Set(entry.executionTargets).size !==
+          entry.executionTargets.length ||
+        entry.executionTargets.some(
+          (target) =>
+            typeof target !== "string" ||
+            !/^[a-z][a-z0-9-]{0,63}$/.test(target),
+        )
       )
         throw new Error("Invalid provider capabilities");
-      providers.push({
-        id: entry.id as ProviderId,
-        executionTargets: entry.executionTargets as ExecutionTarget[],
-      });
+      seen.add(entry.id);
+      const supported = entry.executionTargets.filter(
+        (target): target is ExecutionTarget =>
+          target === "browser" || target === "windows",
+      );
+      if (supported.length)
+        providers.push({ id: entry.id, executionTargets: supported });
     }
     return { providers };
   }
