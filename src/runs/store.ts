@@ -105,13 +105,6 @@ export class RunStore {
     );
     await this.pool.query(
       await readFile(
-        new URL("../../migrations/010_account_deletion.sql", import.meta.url),
-
-        "utf8",
-      ),
-    );
-    await this.pool.query(
-      await readFile(
         new URL("../../migrations/011_recording_chunks.sql", import.meta.url),
         "utf8",
       ),
@@ -125,6 +118,12 @@ export class RunStore {
     await this.pool.query(
       await readFile(
         new URL("../../migrations/013_weekday_schedules.sql", import.meta.url),
+        "utf8",
+      ),
+    );
+    await this.pool.query(
+      await readFile(
+        new URL("../../migrations/014_local_workspace.sql", import.meta.url),
         "utf8",
       ),
     );
