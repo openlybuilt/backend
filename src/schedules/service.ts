@@ -1,4 +1,3 @@
-import { AccountGate } from "../accounts/deletion.js";
 import { Database, isDatabaseFailure } from "../database.js";
 import { PlaceholderStore } from "../placeholders/store.js";
 import { RunService } from "../runs/service.js";
@@ -13,7 +12,6 @@ export class ScheduleService {
   private boundary = new Date();
   constructor(
     private readonly database: Database,
-    private readonly gate: AccountGate,
     private readonly placeholders: PlaceholderStore,
     private readonly store: RunStore,
     private readonly runs: RunService,
@@ -53,32 +51,27 @@ export class ScheduleService {
       const reserved = await reserveNext(
         this.store.pool,
         this.database,
-        this.gate,
         this.placeholders,
         this.store,
         signal,
       );
       if (!reserved) break;
-      try {
-        const run = await this.runs.dispatchPrepared(reserved.request);
-        this.database.assertReady(signal);
-        if (
-          run.status === "dispatch_unknown" ||
-          run.status === "outcome_unknown"
-        ) {
-          await this.store.pool.query(
-            `WITH updated AS (UPDATE schedule_occurrences SET status='outcome_unknown',reason='dispatch_unknown' WHERE id=$1 RETURNING schedule_id)
+      const run = await this.runs.dispatchPrepared(reserved.request);
+      this.database.assertReady(signal);
+      if (
+        run.status === "dispatch_unknown" ||
+        run.status === "outcome_unknown"
+      ) {
+        await this.store.pool.query(
+          `WITH updated AS (UPDATE schedule_occurrences SET status='outcome_unknown',reason='dispatch_unknown' WHERE id=$1 RETURNING schedule_id)
             UPDATE workflow_schedules s SET issue='dispatch_unknown' FROM updated u WHERE s.id=u.schedule_id`,
-            [reserved.occurrenceId],
-          );
-        } else {
-          await this.store.pool.query(
-            "UPDATE schedule_occurrences SET status='started' WHERE id=$1 AND status='dispatching'",
-            [reserved.occurrenceId],
-          );
-        }
-      } finally {
-        reserved.release();
+          [reserved.occurrenceId],
+        );
+      } else {
+        await this.store.pool.query(
+          "UPDATE schedule_occurrences SET status='started' WHERE id=$1 AND status='dispatching'",
+          [reserved.occurrenceId],
+        );
       }
     }
   }

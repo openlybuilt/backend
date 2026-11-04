@@ -21,9 +21,7 @@ import { RunStore } from "./runs/store.js";
 import { workflowCleanupGraceMs } from "./runs/timing.js";
 import { WorkflowStore } from "./workflows/store.js";
 import { parseDefinition, resolveWorkflow } from "./workflows/definition.js";
-import { IdentityClient } from "./identity/client.js";
 import { WorkspaceStore } from "./workspaces/store.js";
-import { AccountDeletionService, AccountGate } from "./accounts/deletion.js";
 import { PlaceholderStore } from "./placeholders/store.js";
 import { ScheduleStore } from "./schedules/store.js";
 import { scheduleRoute } from "./schedules/routes.js";
@@ -33,18 +31,10 @@ const rawPort = process.env.PORT ?? "3000";
 if (!/^\d+$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535)
   throw new Error("PORT must be an integer between 1 and 65535");
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
-const identityClient = new IdentityClient(
-  process.env.AUTH_VERIFY_URL ?? "",
-  process.env.AUTH_SERVICE_TOKEN ?? "",
-);
 const callbackToken = process.env.AGENTS_CALLBACK_TOKEN ?? "";
 if (!/^[A-Za-z0-9_-]{32,256}$/.test(callbackToken))
   throw new Error(
     "AGENTS_CALLBACK_TOKEN must be 32 to 256 URL-safe characters",
-  );
-if (callbackToken === process.env.AUTH_SERVICE_TOKEN)
-  throw new Error(
-    "Agent callback and identity service credentials must differ",
   );
 const database = new Database(process.env.DATABASE_URL);
 const store = new RunStore(database.pool);
@@ -65,22 +55,12 @@ const agents = new AgentsClient(
   process.env.AGENTS_API_TOKEN ?? "",
 );
 const runs = new RunService(store, agents, recordings, database);
-const accountGate = new AccountGate();
 const scheduleService = new ScheduleService(
   database,
-  accountGate,
   placeholders,
   store,
   runs,
 );
-const accountDeletion = new AccountDeletionService(
-  store.pool,
-  agents,
-  identityClient,
-  () => database.ready,
-  () => database.signal,
-);
-accountDeletion.start();
 
 database.start(
   async (signal, recover) => {
@@ -141,7 +121,6 @@ const server = createServer((request, response) => {
     request.once("close", () => clearTimeout(receiveDeadline));
     response.once("close", () => clearTimeout(receiveDeadline));
   }
-  let releaseAccount: (() => void) | undefined;
   void (async () => {
     if (request.method === "GET" && request.url === "/health")
       return send(response, 200, { status: "ok" });
@@ -254,23 +233,8 @@ const server = createServer((request, response) => {
         throw error;
       }
     }
-    const authorization = /^Bearer ([A-Za-z0-9._~-]{1,10000})$/.exec(
-      request.headers.authorization ?? "",
-    );
-    if (request.headers.origin !== undefined || !authorization) {
-      return send(response, 401, { error: "Unauthorized" });
-    }
-    let identity;
-    try {
-      identity = await whileReady(() =>
-        identityClient.verify(authorization[1]!),
-      );
-    } catch {
-      return request.method === "GET" && request.url === "/app-availability"
-        ? send(response, 503, { status: "unavailable" })
-        : send(response, 503, { error: "Identity verification unavailable" });
-    }
-    if (!identity) return send(response, 401, { error: "Unauthorized" });
+    if (request.headers.origin !== undefined)
+      return send(response, 403, { error: "Invalid origin" });
     if (request.method === "GET" && request.url === "/app-availability") {
       try {
         const { executionTargets } = await whileReady(() =>
@@ -298,70 +262,7 @@ const server = createServer((request, response) => {
         });
       }
     }
-    if (request.method === "GET" && request.url === "/account/deletion") {
-      return send(response, 200, {
-        status:
-          (await whileReady(() => accountDeletion.status(identity))) ?? "none",
-      });
-    }
-    if (request.method === "DELETE" && request.url === "/account") {
-      let verified;
-      try {
-        verified = await whileReady(() =>
-          identityClient.verifyDeletion(authorization[1]!),
-        );
-      } catch {
-        return send(response, 503, {
-          error: "Account verification unavailable",
-        });
-      }
-      if (
-        !verified ||
-        verified.issuer !== identity.issuer ||
-        verified.subject !== identity.subject
-      )
-        return send(response, 403, {
-          code: "reauthentication_required",
-          error: "Recent verification required",
-        });
-      try {
-        assertCurrent();
-        await accountGate.block(identity);
-      } catch {
-        return send(response, 409, {
-          error: "Account deletion is being requested",
-        });
-      }
-      try {
-        const workspaceId = await whileReady(() =>
-          workspaces.getOrCreate(identity),
-        );
-        await whileReady(() => accountDeletion.queue(identity, workspaceId));
-      } catch (error) {
-        if (
-          error instanceof Error &&
-          error.message === "Account deletion requested"
-        )
-          return send(response, 202, { status: "pending" });
-        accountGate.unblock(identity);
-        throw error;
-      }
-      return send(response, 202, { status: "pending" });
-    }
-    releaseAccount = accountGate.enter(identity);
-    if (!releaseAccount)
-      return send(response, 409, { error: "Account deletion requested" });
-    let workspaceId: string;
-    try {
-      workspaceId = await whileReady(() => workspaces.getOrCreate(identity));
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message === "Account deletion requested"
-      )
-        return send(response, 409, { error: error.message });
-      throw error;
-    }
+    const workspaceId = await whileReady(() => workspaces.getOrCreate());
     if (
       await scheduleRoute(request, response, {
         workspaceId,
@@ -814,26 +715,24 @@ const server = createServer((request, response) => {
         : send(response, 404, { error: "Run not found" });
     }
     send(response, 404, { error: "Not found" });
-  })()
-    .catch((error: unknown) => {
-      if (isDatabaseFailure(error)) database.unavailable();
-      const unavailable =
-        error instanceof DatabaseUnavailableError || !database.ready;
-      if (
-        request.method === "GET" &&
-        request.url === "/app-availability" &&
-        !response.headersSent
-      )
-        send(response, 503, { status: "unavailable" });
-      else if (!response.headersSent)
-        send(response, unavailable ? 503 : 500, {
-          error: unavailable
-            ? "Database is currently unavailable"
-            : "Internal service error",
-        });
-      else response.end();
-    })
-    .finally(() => releaseAccount?.());
+  })().catch((error: unknown) => {
+    if (isDatabaseFailure(error)) database.unavailable();
+    const unavailable =
+      error instanceof DatabaseUnavailableError || !database.ready;
+    if (
+      request.method === "GET" &&
+      request.url === "/app-availability" &&
+      !response.headersSent
+    )
+      send(response, 503, { status: "unavailable" });
+    else if (!response.headersSent)
+      send(response, unavailable ? 503 : 500, {
+        error: unavailable
+          ? "Database is currently unavailable"
+          : "Internal service error",
+      });
+    else response.end();
+  });
 });
 // Node defaults to five minutes for request bodies; recording transfers may take an hour.
 server.requestTimeout = workflowCleanupGraceMs;
@@ -848,14 +747,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
     server.closeAllConnections();
     void scheduleService
       .stop()
-      .then(() =>
-        Promise.all([
-          runs.stop(),
-          accountDeletion.stop(),
-          database.stop(),
-          closed,
-        ]),
-      )
+      .then(() => Promise.all([runs.stop(), database.stop(), closed]))
       .catch(() => {
         process.exitCode = 1;
       });
