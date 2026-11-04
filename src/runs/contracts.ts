@@ -1,5 +1,6 @@
 import type {
   ExecutionTarget,
+  ProviderId,
   ResolvedWorkflow,
 } from "../workflows/definition.js";
 export type RunRequest = {
@@ -18,6 +19,7 @@ export type RunRequest = {
 };
 export type RunRecord = RunRequest & {
   executionTarget: ExecutionTarget;
+  provider: ProviderId;
   status: string;
   result: unknown;
   createdAt: string;

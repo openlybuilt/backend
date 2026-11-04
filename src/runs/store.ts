@@ -20,6 +20,7 @@ export type WorkflowRun = Pick<
   | "recordingStatus"
   | "recordingEnabled"
   | "executionTarget"
+  | "provider"
 >;
 export type RecentWorkflowRun = WorkflowRun & { workflowName: string };
 
@@ -36,6 +37,8 @@ function workflowIdentity(workflow: RunRequest["workflow"] | null): unknown {
 }
 
 function withRecordingStatus<T extends WorkflowRun>(record: T): T {
+  record.provider ??=
+    record.executionTarget === "windows" ? "daytona" : "onkernel";
   if (
     record.result &&
     typeof record.result === "object" &&
@@ -225,7 +228,7 @@ export class RunStore {
   }
   async get(id: string): Promise<BackendRun | undefined> {
     const result = await this.pool.query(
-      `SELECT id, instruction, max_steps AS "maxSteps", timeout_ms AS "timeoutMs", recording_enabled AS "recordingEnabled",COALESCE(workflow->>'executionTarget',(SELECT v.definition->>'executionTarget' FROM workflow_versions v JOIN workflows w ON w.id=v.workflow_id WHERE v.workflow_id=backend_runs.workflow_id AND v.version=backend_runs.workflow_version AND w.workspace_id=backend_runs.workspace_id),'browser') AS "executionTarget", status, cancel_requested AS "cancelRequested", result, workflow, workflow_id AS "workflowId", workflow_version AS "workflowVersion", workflow_inputs AS "workflowInputs", workspace_id AS "workspaceId", steps, live_view_url AS "liveViewUrl", created_at AS "createdAt", updated_at AS "updatedAt", COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE id=$1`,
+      `SELECT id, instruction, max_steps AS "maxSteps", timeout_ms AS "timeoutMs", recording_enabled AS "recordingEnabled",COALESCE(workflow->>'executionTarget',(SELECT v.definition->>'executionTarget' FROM workflow_versions v JOIN workflows w ON w.id=v.workflow_id WHERE v.workflow_id=backend_runs.workflow_id AND v.version=backend_runs.workflow_version AND w.workspace_id=backend_runs.workspace_id),'browser') AS "executionTarget", workflow->>'provider' AS "provider", status, cancel_requested AS "cancelRequested", result, workflow, workflow_id AS "workflowId", workflow_version AS "workflowVersion", workflow_inputs AS "workflowInputs", workspace_id AS "workspaceId", steps, live_view_url AS "liveViewUrl", created_at AS "createdAt", updated_at AS "updatedAt", COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE id=$1`,
 
       [id],
     );
@@ -241,7 +244,7 @@ export class RunStore {
   }
   async listRecent(workspaceId: string): Promise<RecentWorkflowRun[]> {
     const result = await this.pool.query(
-      `SELECT r.id,r.status,r.result,r.steps,r.workflow_id AS "workflowId",r.workflow_version AS "workflowVersion",r.created_at AS "createdAt",r.updated_at AS "updatedAt",r.recording_enabled AS "recordingEnabled",COALESCE(r.workflow->>'executionTarget',v.definition->>'executionTarget','browser') AS "executionTarget",v.definition->>'name' AS "workflowName",COALESCE((SELECT status FROM run_recordings WHERE run_id=r.id),'unavailable') AS "recordingStatus" FROM backend_runs r JOIN workflows w ON w.id=r.workflow_id AND w.workspace_id=r.workspace_id JOIN workflow_versions v ON v.workflow_id=r.workflow_id AND v.version=r.workflow_version WHERE r.workspace_id=$1 ORDER BY r.created_at DESC,r.id DESC LIMIT 100`,
+      `SELECT r.id,r.status,r.result,r.steps,r.workflow_id AS "workflowId",r.workflow_version AS "workflowVersion",r.created_at AS "createdAt",r.updated_at AS "updatedAt",r.recording_enabled AS "recordingEnabled",COALESCE(r.workflow->>'executionTarget',v.definition->>'executionTarget','browser') AS "executionTarget",r.workflow->>'provider' AS "provider",v.definition->>'name' AS "workflowName",COALESCE((SELECT status FROM run_recordings WHERE run_id=r.id),'unavailable') AS "recordingStatus" FROM backend_runs r JOIN workflows w ON w.id=r.workflow_id AND w.workspace_id=r.workspace_id JOIN workflow_versions v ON v.workflow_id=r.workflow_id AND v.version=r.workflow_version WHERE r.workspace_id=$1 ORDER BY r.created_at DESC,r.id DESC LIMIT 100`,
       [workspaceId],
     );
     return result.rows.map((record: RecentWorkflowRun) =>
@@ -253,7 +256,7 @@ export class RunStore {
     workspaceId: string,
   ): Promise<WorkflowRun[]> {
     const result = await this.pool.query(
-      `SELECT id,status,result,steps,workflow_id AS "workflowId",workflow_version AS "workflowVersion",created_at AS "createdAt",updated_at AS "updatedAt",recording_enabled AS "recordingEnabled",COALESCE(workflow->>'executionTarget',(SELECT v.definition->>'executionTarget' FROM workflow_versions v JOIN workflows w ON w.id=v.workflow_id WHERE v.workflow_id=backend_runs.workflow_id AND v.version=backend_runs.workflow_version AND w.workspace_id=backend_runs.workspace_id),'browser') AS "executionTarget",COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY created_at DESC,id DESC LIMIT 100`,
+      `SELECT id,status,result,steps,workflow_id AS "workflowId",workflow_version AS "workflowVersion",created_at AS "createdAt",updated_at AS "updatedAt",recording_enabled AS "recordingEnabled",COALESCE(workflow->>'executionTarget',(SELECT v.definition->>'executionTarget' FROM workflow_versions v JOIN workflows w ON w.id=v.workflow_id WHERE v.workflow_id=backend_runs.workflow_id AND v.version=backend_runs.workflow_version AND w.workspace_id=backend_runs.workspace_id),'browser') AS "executionTarget",workflow->>'provider' AS "provider",COALESCE((SELECT status FROM run_recordings WHERE run_id=backend_runs.id),'unavailable') AS "recordingStatus" FROM backend_runs WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY created_at DESC,id DESC LIMIT 100`,
       [workflowId, workspaceId],
     );
     return result.rows.map((record: WorkflowRun) =>

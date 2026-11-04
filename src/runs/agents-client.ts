@@ -1,5 +1,9 @@
 import type { RunRequest } from "./contracts.js";
-import type { ExecutionTarget } from "../workflows/definition.js";
+import type { ExecutionTarget, ProviderId } from "../workflows/definition.js";
+export type ProviderCapability = {
+  id: ProviderId;
+  executionTargets: ExecutionTarget[];
+};
 export type AgentRun = {
   id: string;
   status: string;
@@ -57,6 +61,61 @@ export class AgentsClient {
     )
       throw new Error("Invalid execution capabilities");
     return { executionTargets: targets as ExecutionTarget[] };
+  }
+  async providerCapabilities(
+    signal?: AbortSignal,
+  ): Promise<{ providers: ProviderCapability[] }> {
+    const response = await fetch(new URL("/provider-capabilities", this.base), {
+      headers: { authorization: `Bearer ${this.token}` },
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(10000)])
+        : AbortSignal.timeout(10000),
+      redirect: "error",
+    });
+    if (!response.ok || !response.body) {
+      await response.body?.cancel();
+      throw new Error("Provider capabilities unavailable");
+    }
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    for await (const chunk of response.body) {
+      bytes += chunk.byteLength;
+      if (bytes > 4096) throw new Error("Invalid provider capabilities");
+      chunks.push(chunk);
+    }
+    const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new Error("Invalid provider capabilities");
+    const data = value as Record<string, unknown>;
+    if (
+      Object.keys(data).length !== 1 ||
+      !Array.isArray(data.providers) ||
+      data.providers.length > 2
+    )
+      throw new Error("Invalid provider capabilities");
+    const providers: ProviderCapability[] = [];
+    for (const item of data.providers) {
+      if (!item || typeof item !== "object" || Array.isArray(item))
+        throw new Error("Invalid provider capabilities");
+      const entry = item as Record<string, unknown>;
+      if (
+        Object.keys(entry).length !== 2 ||
+        !Array.isArray(entry.executionTargets) ||
+        entry.executionTargets.length !== 1 ||
+        !(
+          (entry.id === "onkernel" &&
+            entry.executionTargets[0] === "browser") ||
+          (entry.id === "daytona" && entry.executionTargets[0] === "windows")
+        ) ||
+        providers.some((previous) => previous.id === entry.id)
+      )
+        throw new Error("Invalid provider capabilities");
+      providers.push({
+        id: entry.id as ProviderId,
+        executionTargets: entry.executionTargets as ExecutionTarget[],
+      });
+    }
+    return { providers };
   }
   async request(
     path: string,
