@@ -25,6 +25,9 @@ import { IdentityClient } from "./identity/client.js";
 import { WorkspaceStore } from "./workspaces/store.js";
 import { AccountDeletionService, AccountGate } from "./accounts/deletion.js";
 import { PlaceholderStore } from "./placeholders/store.js";
+import { ScheduleStore } from "./schedules/store.js";
+import { scheduleRoute } from "./schedules/routes.js";
+import { ScheduleService } from "./schedules/service.js";
 
 const rawPort = process.env.PORT ?? "3000";
 if (!/^\d+$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535)
@@ -55,6 +58,7 @@ const placeholders = new PlaceholderStore(
 const events = new EventStore(store.pool);
 const recordings = new RecordingStore(store.pool);
 const recordingPreferences = new RecordingPreferences(store.pool);
+const schedules = new ScheduleStore(store.pool, placeholders);
 
 const agents = new AgentsClient(
   process.env.AGENTS_URL ?? "http://127.0.0.1:3100",
@@ -62,6 +66,13 @@ const agents = new AgentsClient(
 );
 const runs = new RunService(store, agents, recordings, database);
 const accountGate = new AccountGate();
+const scheduleService = new ScheduleService(
+  database,
+  accountGate,
+  placeholders,
+  store,
+  runs,
+);
 const accountDeletion = new AccountDeletionService(
   store.pool,
   agents,
@@ -81,6 +92,7 @@ database.start(
 );
 
 runs.start();
+scheduleService.start();
 function send(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, {
     "content-type": "application/json",
@@ -350,6 +362,16 @@ const server = createServer((request, response) => {
         return send(response, 409, { error: error.message });
       throw error;
     }
+    if (
+      await scheduleRoute(request, response, {
+        workspaceId,
+        store: schedules,
+        readJson,
+        whileReady,
+        send,
+      })
+    )
+      return;
     if (request.url === "/settings/recordings" && request.method === "GET")
       return send(response, 200, {
         enabled: await whileReady(() => recordingPreferences.get(workspaceId)),
@@ -824,12 +846,17 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
       server.close(() => resolve()),
     );
     server.closeAllConnections();
-    void Promise.all([
-      runs.stop(),
-      accountDeletion.stop(),
-      database.stop(),
-      closed,
-    ]).catch(() => {
-      process.exitCode = 1;
-    });
+    void scheduleService
+      .stop()
+      .then(() =>
+        Promise.all([
+          runs.stop(),
+          accountDeletion.stop(),
+          database.stop(),
+          closed,
+        ]),
+      )
+      .catch(() => {
+        process.exitCode = 1;
+      });
   });
