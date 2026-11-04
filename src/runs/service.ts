@@ -13,8 +13,6 @@ const terminal = new Set([
   "interrupted",
   "outcome_unknown",
 ]);
-class ProviderUnavailableError extends Error {}
-class CancelledBeforeDispatchError extends Error {}
 export class RunService {
   private readonly dispatches = new Map<string, Promise<BackendRun>>();
   private readonly owned = new Set<string>();
@@ -126,6 +124,26 @@ export class RunService {
     signal: AbortSignal,
   ): Promise<BackendRun> {
     this.database.assertReady(signal);
+    // Discovery is read-only and must finish before the agent dispatch boundary.
+    // A crash during this check leaves dispatch_pending safely recoverable.
+    if (request.workflow?.provider) {
+      let available = false;
+      try {
+        const { providers } = await this.agents.providerCapabilities(signal);
+        available = providers.some(
+          (provider) =>
+            provider.id === request.workflow!.provider &&
+            provider.executionTargets.includes(
+              request.workflow!.executionTarget,
+            ),
+        );
+      } catch (error) {
+        if (signal.aborted) throw error;
+      }
+      this.database.assertReady(signal);
+      if (!available) await this.store.failBeforeDispatch(request.id);
+    }
+    this.database.assertReady(signal);
     if (await this.store.beginDispatch(request.id))
       try {
         this.database.assertReady(signal);
@@ -137,28 +155,6 @@ export class RunService {
             message: "Run cancelled before execution",
           });
         } else {
-          if (request.workflow?.provider) {
-            let available = false;
-            try {
-              const { providers } =
-                await this.agents.providerCapabilities(signal);
-              available = providers.some(
-                (provider) =>
-                  provider.id === request.workflow!.provider &&
-                  provider.executionTargets.includes(
-                    request.workflow!.executionTarget,
-                  ),
-              );
-            } catch (error) {
-              if (signal.aborted) throw error;
-            }
-            this.database.assertReady(signal);
-            if (!available) throw new ProviderUnavailableError();
-            const afterCheck = await this.store.get(request.id);
-            this.database.assertReady(signal);
-            if (afterCheck?.cancelRequested)
-              throw new CancelledBeforeDispatchError();
-          }
           const preference = await this.store.pool.query(
             "SELECT recording_stop_requested FROM backend_runs WHERE id=$1",
             [request.id],
@@ -175,7 +171,6 @@ export class RunService {
           this.database.assertReady(signal);
           if (!remote || remote.id !== request.id)
             throw new Error("Invalid agents response");
-          // The acknowledgement never overwrites progress already reported.
           const fresh = await this.store.get(request.id);
           this.database.assertReady(signal);
           if (fresh?.cancelRequested && !terminal.has(fresh.status))
@@ -186,23 +181,9 @@ export class RunService {
               signal,
             );
         }
-      } catch (error) {
+      } catch {
         this.database.assertReady(signal);
-        if (
-          error instanceof ProviderUnavailableError ||
-          error instanceof CancelledBeforeDispatchError
-        ) {
-          const current = await this.store.get(request.id);
-          this.database.assertReady(signal);
-          const status = current?.cancelRequested ? "cancelled" : "failed";
-          await this.store.update(request.id, status, {
-            status,
-            message:
-              status === "cancelled"
-                ? "Run cancelled before execution"
-                : "The selected provider is currently unavailable.",
-          });
-        } else await this.store.update(request.id, "dispatch_unknown", null);
+        await this.store.update(request.id, "dispatch_unknown", null);
       }
     this.database.assertReady(signal);
     const saved = await this.store.get(request.id);
