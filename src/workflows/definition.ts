@@ -1,4 +1,5 @@
 export type ExecutionTarget = "browser" | "windows";
+export type ProviderId = "onkernel" | "daytona";
 export type WorkflowStep =
   | { type: "navigate"; url: string }
   | { type: "type"; text: string; target?: string; region?: string }
@@ -15,6 +16,7 @@ export type WorkflowStep =
   | { type: "ai"; instruction: string };
 export type ResolvedWorkflow = {
   executionTarget: ExecutionTarget;
+  provider?: ProviderId;
   steps: WorkflowStep[];
 };
 
@@ -24,14 +26,28 @@ function parseExecutionTarget(value: unknown): ExecutionTarget {
   throw new Error("Invalid execution target");
 }
 
+function parseProvider(
+  value: unknown,
+  target: ExecutionTarget,
+): ProviderId | undefined {
+  if (value === undefined) return undefined;
+  if (
+    (value === "onkernel" && target === "browser") ||
+    (value === "daytona" && target === "windows")
+  )
+    return value;
+  throw new Error("Provider is incompatible with the selected VM type");
+}
+
 export function parseWorkflow(input: unknown): ResolvedWorkflow {
   if (!input || typeof input !== "object" || Array.isArray(input))
     throw new Error("Invalid workflow");
   const value = input as Record<string, unknown>;
   const executionTarget = parseExecutionTarget(value.executionTarget);
+  const provider = parseProvider(value.provider, executionTarget);
   if (
     Object.keys(value).some(
-      (key) => !["steps", "executionTarget"].includes(key),
+      (key) => !["steps", "executionTarget", "provider"].includes(key),
     ) ||
     !Array.isArray(value.steps) ||
     value.steps.length < 1 ||
@@ -166,11 +182,16 @@ export function parseWorkflow(input: unknown): ResolvedWorkflow {
       return { type: "click", x: step.x, y: step.y };
     throw new Error("Invalid workflow step");
   });
-  return { executionTarget, steps };
+  return {
+    executionTarget,
+    ...(provider === undefined ? {} : { provider }),
+    steps,
+  };
 }
 
 export type WorkflowDefinition = {
   executionTarget?: ExecutionTarget;
+  provider?: ProviderId;
   name: string;
   description: string;
   inputs: string[];
@@ -205,6 +226,9 @@ export function resolveWorkflow(
   const strings = values as Record<string, string>;
   return parseWorkflow({
     executionTarget: definition.executionTarget,
+    ...(definition.provider === undefined
+      ? {}
+      : { provider: definition.provider }),
     steps: definition.steps.map((step) => {
       if (step.type === "navigate")
         return { ...step, url: replace(step.url, strings) };
@@ -230,12 +254,18 @@ export function parseDefinition(input: unknown): WorkflowDefinition {
     throw new Error("Invalid workflow definition");
   const value = input as Record<string, unknown>;
   const executionTarget = parseExecutionTarget(value.executionTarget);
+  const provider = parseProvider(value.provider, executionTarget);
   if (
     Object.keys(value).some(
       (key) =>
-        !["name", "description", "inputs", "steps", "executionTarget"].includes(
-          key,
-        ),
+        ![
+          "name",
+          "description",
+          "inputs",
+          "steps",
+          "executionTarget",
+          "provider",
+        ].includes(key),
     ) ||
     typeof value.name !== "string" ||
     (value.description !== undefined &&
@@ -277,9 +307,15 @@ export function parseDefinition(input: unknown): WorkflowDefinition {
       );
     return copy;
   });
-  if (sample.length > 0) parseWorkflow({ executionTarget, steps: sample });
+  if (sample.length > 0)
+    parseWorkflow({
+      executionTarget,
+      ...(provider === undefined ? {} : { provider }),
+      steps: sample,
+    });
   return {
     ...(value.executionTarget === undefined ? {} : { executionTarget }),
+    ...(provider === undefined ? {} : { provider }),
     name: value.name.trim(),
     description: (value.description as string | undefined) ?? "",
     inputs,
