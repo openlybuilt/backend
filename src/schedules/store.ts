@@ -138,7 +138,7 @@ export class ScheduleStore {
     workflowId: string,
   ): Promise<ScheduleView[] | undefined> {
     const workflow = await this.pool.query(
-      "SELECT 1 FROM workflows WHERE id=$1 AND workspace_id=$2",
+      "SELECT 1 FROM workflows WHERE id=$1 AND workspace_id=$2 AND deleted_at IS NULL",
       [workflowId, workspaceId],
     );
     if (!workflow.rowCount) return undefined;
@@ -154,7 +154,7 @@ export class ScheduleStore {
     workflowId: string,
   ) {
     const lock = await client.query(
-      "SELECT 1 FROM workflows WHERE id=$1 AND workspace_id=$2 FOR UPDATE",
+      "SELECT 1 FROM workflows WHERE id=$1 AND workspace_id=$2 AND deleted_at IS NULL FOR UPDATE",
       [workflowId, workspaceId],
     );
     if (!lock.rowCount) return undefined;
@@ -364,6 +364,9 @@ export class ScheduleStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      await client.query("SELECT id FROM workspaces WHERE id=$1 FOR UPDATE", [
+        workspaceId,
+      ]);
       const row = (
         await client.query<Row>(
           `${select} WHERE s.id=$1 AND s.workspace_id=$2 FOR UPDATE OF s`,
@@ -402,7 +405,11 @@ export class ScheduleStore {
             workspaceId,
             row.workflow_id,
           );
-          if (!current) throw new Error("Workflow not found");
+          if (!current)
+            throw new ScheduleConflict(
+              "workflow_deleted",
+              "This workflow has been deleted.",
+            );
           if (current.missing.length)
             throw new ScheduleConflict(
               "missing_placeholders",

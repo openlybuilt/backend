@@ -44,7 +44,7 @@ export class WorkflowStore {
     try {
       await client.query("BEGIN");
       const owner = await client.query(
-        "SELECT id FROM workflows WHERE id=$1 AND workspace_id=$2 FOR UPDATE",
+        "SELECT id FROM workflows WHERE id=$1 AND workspace_id=$2 AND deleted_at IS NULL FOR UPDATE",
         [id, workspaceId],
       );
       if (!owner.rowCount) {
@@ -76,18 +76,51 @@ export class WorkflowStore {
     id: string,
     workspaceId: string,
     version?: number,
+    includeDeleted = false,
   ): Promise<WorkflowVersion | undefined> {
     const result = await this.pool.query(
-      'SELECT v.workflow_id AS id,v.version,v.definition,v.created_at AS "createdAt" FROM workflow_versions v JOIN workflows w ON w.id=v.workflow_id WHERE v.workflow_id=$1 AND w.workspace_id=$2 AND ($3::integer IS NULL OR v.version=$3) ORDER BY v.version DESC LIMIT 1',
-      [id, workspaceId, version ?? null],
+      'SELECT v.workflow_id AS id,v.version,v.definition,v.created_at AS "createdAt" FROM workflow_versions v JOIN workflows w ON w.id=v.workflow_id WHERE v.workflow_id=$1 AND w.workspace_id=$2 AND ($3::integer IS NULL OR v.version=$3) AND ($4::boolean OR w.deleted_at IS NULL) ORDER BY v.version DESC LIMIT 1',
+      [id, workspaceId, version ?? null, includeDeleted],
     );
     return result.rows[0] as WorkflowVersion | undefined;
   }
   async list(workspaceId: string): Promise<WorkflowVersion[]> {
     const result = await this.pool.query(
-      'SELECT DISTINCT ON (v.workflow_id) v.workflow_id AS id,v.version,v.definition,v.created_at AS "createdAt" FROM workflow_versions v JOIN workflows w ON w.id=v.workflow_id WHERE w.workspace_id=$1 ORDER BY v.workflow_id,v.version DESC',
+      'SELECT DISTINCT ON (v.workflow_id) v.workflow_id AS id,v.version,v.definition,v.created_at AS "createdAt" FROM workflow_versions v JOIN workflows w ON w.id=v.workflow_id WHERE w.workspace_id=$1 AND w.deleted_at IS NULL ORDER BY v.workflow_id,v.version DESC',
       [workspaceId],
     );
     return result.rows as WorkflowVersion[];
+  }
+  async delete(id: string, workspaceId: string): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT id FROM workspaces WHERE id=$1 FOR UPDATE", [
+        workspaceId,
+      ]);
+      const result = await client.query(
+        "UPDATE workflows SET deleted_at=now() WHERE id=$1 AND workspace_id=$2 AND deleted_at IS NULL RETURNING id",
+        [id, workspaceId],
+      );
+      if (!result.rowCount) {
+        await client.query("ROLLBACK");
+        return false;
+      }
+      await client.query(
+        "UPDATE schedule_occurrences SET status='missed',reason='workflow_deleted' WHERE status='queued' AND schedule_id IN (SELECT id FROM workflow_schedules WHERE workflow_id=$1 AND workspace_id=$2)",
+        [id, workspaceId],
+      );
+      await client.query(
+        "UPDATE workflow_schedules SET enabled=false,next_run_at=NULL,issue='workflow_deleted' WHERE workflow_id=$1 AND workspace_id=$2",
+        [id, workspaceId],
+      );
+      await client.query("COMMIT");
+      return true;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }

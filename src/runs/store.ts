@@ -127,6 +127,12 @@ export class RunStore {
         "utf8",
       ),
     );
+    await this.pool.query(
+      await readFile(
+        new URL("../../migrations/015_workflow_deletion.sql", import.meta.url),
+        "utf8",
+      ),
+    );
     // These reservations never reached beginDispatch, so no agent request was sent.
     await this.pool
       .query(`DELETE FROM backend_runs b USING schedule_occurrences o
@@ -160,6 +166,13 @@ export class RunStore {
       [request.workspaceId],
     );
     if (!preference.rows[0]) throw new Error("Workspace not found");
+    if (request.workflowId) {
+      const workflow = await client.query(
+        "SELECT id FROM workflows WHERE id=$1 AND workspace_id=$2 AND deleted_at IS NULL FOR UPDATE",
+        [request.workflowId, request.workspaceId],
+      );
+      if (!workflow.rowCount) throw new Error("Workflow not found");
+    }
     request.recordingEnabled =
       request.recordingEnabled !== false &&
       preference.rows[0].recordings_allowed;

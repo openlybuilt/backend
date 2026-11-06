@@ -446,7 +446,12 @@ const server = createServer((request, response) => {
       if (number > 2147483647)
         return send(response, 400, { error: "Invalid workflow version" });
       const found = await whileReady(() =>
-        workflows.get(versionMatch[1]!.toLowerCase(), workspaceId, number),
+        workflows.get(
+          versionMatch[1]!.toLowerCase(),
+          workspaceId,
+          number,
+          true,
+        ),
       );
       return found
         ? send(response, 200, found)
@@ -458,6 +463,12 @@ const server = createServer((request, response) => {
       );
     if (workflowMatch) {
       const workflowId = workflowMatch[1]!.toLowerCase();
+      if (request.method === "DELETE" && !workflowMatch[2])
+        return (await whileReady(() =>
+          workflows.delete(workflowId, workspaceId),
+        ))
+          ? send(response, 200, { deleted: true })
+          : send(response, 404, { error: "Workflow not found" });
       if (request.method === "GET" && !workflowMatch[2]) {
         const found = await whileReady(() =>
           workflows.get(workflowId, workspaceId),
@@ -646,6 +657,8 @@ const server = createServer((request, response) => {
             ),
           );
         } catch (error) {
+          if (error instanceof Error && error.message === "Workflow not found")
+            return send(response, 404, { error: error.message });
           if (
             error instanceof Error &&
             error.message === "Run ID already has different inputs"
