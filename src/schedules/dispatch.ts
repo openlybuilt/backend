@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
-import { AccountGate } from "../accounts/deletion.js";
 import { Database, isDatabaseFailure } from "../database.js";
 import { PlaceholderStore } from "../placeholders/store.js";
 import { parseRun, type RunRequest } from "../runs/contracts.js";
@@ -10,8 +9,6 @@ import { parseDefinition, resolveWorkflow } from "../workflows/definition.js";
 type Candidate = {
   id: string;
   workspace_id: string;
-  issuer: string;
-  subject: string;
 };
 type QueueRow = {
   schedule_id: string;
@@ -29,29 +26,20 @@ const terminal =
 export async function reserveNext(
   pool: pg.Pool,
   database: Database,
-  gate: AccountGate,
   placeholders: PlaceholderStore,
   runs: RunStore,
   signal: AbortSignal,
-): Promise<
-  { request: RunRequest; occurrenceId: string; release: () => void } | undefined
-> {
+): Promise<{ request: RunRequest; occurrenceId: string } | undefined> {
   database.assertReady(signal);
   const candidate =
-    await pool.query<Candidate>(`SELECT o.id,s.workspace_id,i.issuer,i.subject FROM schedule_occurrences o
-    JOIN workflow_schedules s ON s.id=o.schedule_id JOIN workspaces w ON w.id=s.workspace_id JOIN identities i ON i.id=w.identity_id
+    await pool.query<Candidate>(`SELECT o.id,s.workspace_id FROM schedule_occurrences o
+    JOIN workflow_schedules s ON s.id=o.schedule_id
     WHERE o.status='queued' AND s.enabled AND s.issue IS NULL
-      AND NOT EXISTS (SELECT 1 FROM account_deletions d WHERE d.workspace_id=s.workspace_id)
       AND (s.kind IN ('once','weekly') OR NOT EXISTS (SELECT 1 FROM backend_runs b WHERE b.workflow_id=s.workflow_id AND b.workspace_id=s.workspace_id AND b.status NOT IN (${terminal})))
     ORDER BY o.scheduled_at,o.id LIMIT 1`);
   if (!candidate.rows.length) return undefined;
   const item = candidate.rows[0]!;
-  const release = gate.enter({ issuer: item.issuer, subject: item.subject });
-  if (!release) return undefined;
-  const client = await pool.connect().catch((error) => {
-    release();
-    throw error;
-  });
+  const client = await pool.connect();
   try {
     database.assertReady(signal);
     await client.query("BEGIN");
@@ -71,16 +59,6 @@ export async function reserveNext(
       schedule.issue
     ) {
       await client.query("ROLLBACK");
-      release();
-      return undefined;
-    }
-    const deleted = await client.query(
-      "SELECT 1 FROM account_deletions WHERE workspace_id=$1",
-      [schedule.workspace_id],
-    );
-    if (deleted.rowCount) {
-      await client.query("ROLLBACK");
-      release();
       return undefined;
     }
     if (schedule.kind === "interval") {
@@ -90,17 +68,15 @@ export async function reserveNext(
       );
       if (active.rowCount) {
         await client.query("ROLLBACK");
-        release();
         return undefined;
       }
     }
     const owner = await client.query(
-      "SELECT id FROM workflows WHERE id=$1 AND workspace_id=$2 FOR UPDATE",
+      "SELECT id FROM workflows WHERE id=$1 AND workspace_id=$2 AND deleted_at IS NULL FOR UPDATE",
       [schedule.workflow_id, schedule.workspace_id],
     );
     if (!owner.rowCount) {
       await client.query("ROLLBACK");
-      release();
       return undefined;
     }
     const version = await client.query<{
@@ -138,7 +114,6 @@ export async function reserveNext(
         [schedule.schedule_id],
       );
       await client.query("COMMIT");
-      release();
       return undefined;
     }
     if (inputs.missing.length) {
@@ -148,7 +123,6 @@ export async function reserveNext(
       );
       database.assertReady(signal);
       await client.query("COMMIT");
-      release();
       return undefined;
     }
     if (
@@ -162,7 +136,6 @@ export async function reserveNext(
       );
       database.assertReady(signal);
       await client.query("COMMIT");
-      release();
       return undefined;
     }
     let resolved;
@@ -175,7 +148,6 @@ export async function reserveNext(
       );
       database.assertReady(signal);
       await client.query("COMMIT");
-      release();
       return undefined;
     }
     const input = parseRun({
@@ -206,10 +178,9 @@ export async function reserveNext(
     );
     database.assertReady(signal);
     await client.query("COMMIT");
-    return { request, occurrenceId: item.id, release };
+    return { request, occurrenceId: item.id };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
-    release();
     throw error;
   } finally {
     client.release();

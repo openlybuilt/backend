@@ -108,13 +108,6 @@ export class RunStore {
     );
     await this.pool.query(
       await readFile(
-        new URL("../../migrations/010_account_deletion.sql", import.meta.url),
-
-        "utf8",
-      ),
-    );
-    await this.pool.query(
-      await readFile(
         new URL("../../migrations/011_recording_chunks.sql", import.meta.url),
         "utf8",
       ),
@@ -133,7 +126,19 @@ export class RunStore {
     );
     await this.pool.query(
       await readFile(
-        new URL("../../migrations/014_run_provider.sql", import.meta.url),
+        new URL("../../migrations/014_local_workspace.sql", import.meta.url),
+        "utf8",
+      ),
+    );
+    await this.pool.query(
+      await readFile(
+        new URL("../../migrations/015_workflow_deletion.sql", import.meta.url),
+        "utf8",
+      ),
+    );
+    await this.pool.query(
+      await readFile(
+        new URL("../../migrations/016_run_provider.sql", import.meta.url),
         "utf8",
       ),
     );
@@ -170,6 +175,13 @@ export class RunStore {
       [request.workspaceId],
     );
     if (!preference.rows[0]) throw new Error("Workspace not found");
+    if (request.workflowId) {
+      const workflow = await client.query(
+        "SELECT id FROM workflows WHERE id=$1 AND workspace_id=$2 AND deleted_at IS NULL FOR UPDATE",
+        [request.workflowId, request.workspaceId],
+      );
+      if (!workflow.rowCount) throw new Error("Workflow not found");
+    }
     request.recordingEnabled =
       request.recordingEnabled !== false &&
       preference.rows[0].recordings_allowed;

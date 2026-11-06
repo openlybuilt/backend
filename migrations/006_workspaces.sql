@@ -1,14 +1,5 @@
-CREATE TABLE IF NOT EXISTS identities (
-  id uuid PRIMARY KEY,
-  issuer text NOT NULL,
-  subject text NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (issuer, subject)
-);
-
 CREATE TABLE IF NOT EXISTS workspaces (
   id uuid PRIMARY KEY,
-  identity_id uuid NOT NULL UNIQUE REFERENCES identities(id),
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
