@@ -124,6 +124,26 @@ export class RunService {
     signal: AbortSignal,
   ): Promise<BackendRun> {
     this.database.assertReady(signal);
+    // Discovery is read-only and must finish before the agent dispatch boundary.
+    // A crash during this check leaves dispatch_pending safely recoverable.
+    if (request.workflow?.provider) {
+      let available = false;
+      try {
+        const { providers } = await this.agents.providerCapabilities(signal);
+        available = providers.some(
+          (provider) =>
+            provider.id === request.workflow!.provider &&
+            provider.executionTargets.includes(
+              request.workflow!.executionTarget,
+            ),
+        );
+      } catch (error) {
+        if (signal.aborted) throw error;
+      }
+      this.database.assertReady(signal);
+      if (!available) await this.store.failBeforeDispatch(request.id);
+    }
+    this.database.assertReady(signal);
     if (await this.store.beginDispatch(request.id))
       try {
         this.database.assertReady(signal);
@@ -151,7 +171,6 @@ export class RunService {
           this.database.assertReady(signal);
           if (!remote || remote.id !== request.id)
             throw new Error("Invalid agents response");
-          // The acknowledgement never overwrites progress already reported.
           const fresh = await this.store.get(request.id);
           this.database.assertReady(signal);
           if (fresh?.cancelRequested && !terminal.has(fresh.status))
@@ -170,6 +189,7 @@ export class RunService {
     const saved = await this.store.get(request.id);
     this.database.assertReady(signal);
     if (!saved) throw new Error("Run missing");
+    if (terminal.has(saved.status)) this.owned.delete(request.id);
     return saved;
   }
   private async reconcileActive(): Promise<void> {
