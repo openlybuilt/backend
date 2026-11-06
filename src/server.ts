@@ -262,6 +262,19 @@ const server = createServer((request, response) => {
         });
       }
     }
+    if (request.method === "GET" && request.url === "/provider-capabilities") {
+      try {
+        return send(
+          response,
+          200,
+          await whileReady(() => agents.providerCapabilities(signal)),
+        );
+      } catch {
+        return send(response, 503, {
+          error: "Provider capabilities unavailable",
+        });
+      }
+    }
     const workspaceId = await whileReady(() => workspaces.getOrCreate());
     if (
       await scheduleRoute(request, response, {

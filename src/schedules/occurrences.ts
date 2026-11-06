@@ -27,7 +27,7 @@ export async function recoverReservations(
     await client.query(`UPDATE schedule_occurrences o SET status='queued',run_id=NULL
       WHERE o.status='dispatching' AND NOT EXISTS (SELECT 1 FROM backend_runs b WHERE b.id=o.run_id)`);
     // A completed callback is conclusive even if the scheduler's acknowledgement was lost.
-    await client.query(`UPDATE schedule_occurrences o SET status='started'
+    await client.query(`UPDATE schedule_occurrences o SET status=CASE WHEN b.status='failed' THEN 'failed' ELSE 'started' END
       FROM backend_runs b WHERE o.status='dispatching' AND o.run_id=b.id AND b.status IN ('completed','failed','cancelled')`);
     await client.query(`WITH uncertain AS (
       UPDATE schedule_occurrences o SET status='outcome_unknown',reason='dispatch_unknown'
