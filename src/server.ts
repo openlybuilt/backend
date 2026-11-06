@@ -18,6 +18,7 @@ import { parseRun } from "./runs/contracts.js";
 import { parseUpdate } from "./runs/updates.js";
 import { RunService } from "./runs/service.js";
 import { RunStore } from "./runs/store.js";
+import { GuideExampleStore } from "./runs/guide-examples.js";
 import { workflowCleanupGraceMs } from "./runs/timing.js";
 import { WorkflowStore } from "./workflows/store.js";
 import { parseDefinition, resolveWorkflow } from "./workflows/definition.js";
@@ -38,6 +39,7 @@ if (!/^[A-Za-z0-9_-]{32,256}$/.test(callbackToken))
   );
 const database = new Database(process.env.DATABASE_URL);
 const store = new RunStore(database.pool);
+const guideExamples = new GuideExampleStore(database.pool);
 
 const workflows = new WorkflowStore(store.pool);
 const workspaces = new WorkspaceStore(store.pool);
@@ -402,12 +404,73 @@ const server = createServer((request, response) => {
         ? send(response, 200, saved)
         : send(response, 404, { error: "Run not found" });
     }
-    if (request.method === "GET" && request.url === "/runs")
+    if (request.method === "POST" && request.url === "/guide-example-runs") {
+      if (
+        !/^application\/json(?:\s*;|$)/i.test(
+          request.headers["content-type"] ?? "",
+        )
+      )
+        return send(response, 415, { error: "JSON content type required" });
+      let raw: unknown;
+      try {
+        raw = await whileReady(() => readJson(request));
+      } catch (error) {
+        if (error instanceof DatabaseUnavailableError) throw error;
+        return send(response, 400, { error: "Invalid JSON" });
+      }
+      if (!raw || typeof raw !== "object" || Array.isArray(raw))
+        return send(response, 400, { error: "Invalid example run" });
+      const value = raw as Record<string, unknown>;
+      const uuid =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      if (
+        Object.keys(value).some(
+          (key) => !["id", "workflowId", "version"].includes(key),
+        ) ||
+        typeof value.id !== "string" ||
+        !uuid.test(value.id) ||
+        typeof value.workflowId !== "string" ||
+        !uuid.test(value.workflowId) ||
+        typeof value.version !== "number" ||
+        !Number.isInteger(value.version) ||
+        value.version < 1 ||
+        value.version > 2147483647
+      )
+        return send(response, 400, { error: "Invalid example run" });
+      const saved = await whileReady(() =>
+        guideExamples.create(
+          value.id as string,
+          value.workflowId as string,
+          value.version as number,
+          workspaceId,
+        ),
+      );
+      return saved
+        ? send(response, 201, { saved: true })
+        : send(response, 409, {
+            error:
+              "Example workflow is unavailable or run ID is already in use",
+          });
+    }
+    if (request.method === "GET" && request.url === "/runs") {
+      const [runs, examples] = await whileReady(() =>
+        Promise.all([
+          store.listRecent(workspaceId),
+          guideExamples.list(workspaceId),
+        ]),
+      );
       return send(
         response,
         200,
-        await whileReady(() => store.listRecent(workspaceId)),
+        [...runs, ...examples]
+          .sort(
+            (a, b) =>
+              Date.parse(String((b as { createdAt: unknown }).createdAt)) -
+              Date.parse(String((a as { createdAt: unknown }).createdAt)),
+          )
+          .slice(0, 100),
       );
+    }
     if (request.method === "GET" && request.url === "/workflows")
       return send(
         response,
@@ -484,9 +547,19 @@ const server = createServer((request, response) => {
         return send(
           response,
           200,
-          await whileReady(() =>
-            store.listForWorkflow(workflowId, workspaceId),
-          ),
+          await whileReady(async () => {
+            const [runs, examples] = await Promise.all([
+              store.listForWorkflow(workflowId, workspaceId),
+              guideExamples.list(workspaceId, workflowId),
+            ]);
+            return [...runs, ...examples]
+              .sort(
+                (a, b) =>
+                  Date.parse(String((b as { createdAt: unknown }).createdAt)) -
+                  Date.parse(String((a as { createdAt: unknown }).createdAt)),
+              )
+              .slice(0, 100);
+          }),
         );
       }
       if (request.method === "POST" && workflowMatch[2] === "versions") {
