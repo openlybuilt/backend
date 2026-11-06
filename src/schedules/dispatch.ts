@@ -72,7 +72,7 @@ export async function reserveNext(
       }
     }
     const owner = await client.query(
-      "SELECT id FROM workflows WHERE id=$1 AND workspace_id=$2 FOR UPDATE",
+      "SELECT id FROM workflows WHERE id=$1 AND workspace_id=$2 AND deleted_at IS NULL FOR UPDATE",
       [schedule.workflow_id, schedule.workspace_id],
     );
     if (!owner.rowCount) {
