@@ -142,6 +142,15 @@ export class RunStore {
         "utf8",
       ),
     );
+    await this.pool.query(
+      await readFile(
+        new URL(
+          "../../migrations/017_guide_example_history.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
     // These reservations never reached beginDispatch, so no agent request was sent.
     await this.pool
       .query(`DELETE FROM backend_runs b USING schedule_occurrences o
