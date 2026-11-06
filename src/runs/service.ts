@@ -189,6 +189,7 @@ export class RunService {
     const saved = await this.store.get(request.id);
     this.database.assertReady(signal);
     if (!saved) throw new Error("Run missing");
+    if (terminal.has(saved.status)) this.owned.delete(request.id);
     return saved;
   }
   private async reconcileActive(): Promise<void> {
