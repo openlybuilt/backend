@@ -10,9 +10,9 @@ Use Node.js 24, pnpm 11.25.0, PostgreSQL, and a configured agents service. The b
 
 | Variable                     | Purpose                                                                                                   |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `PORT`                       | Backend port; default `3000`.                                                                             |
+| `PORT`                       | Backend port; default `2120`.                                                                             |
 | `DATABASE_URL`               | PostgreSQL connection string for the local workspace.                                                     |
-| `AGENTS_URL`                 | Agents loopback origin; default `http://127.0.0.1:3100`.                                                  |
+| `AGENTS_URL`                 | Agents loopback origin; default `http://127.0.0.1:2130`.                                                  |
 | `AGENTS_API_TOKEN`           | Shared bearer token used to call agents.                                                                  |
 | `AGENTS_CALLBACK_TOKEN`      | Shared bearer token used to authenticate agent callbacks.                                                 |
 | `PLACEHOLDER_ENCRYPTION_KEY` | Base64-encoded 32-byte key for saved placeholder values. Keep it stable so saved values can be decrypted. |
