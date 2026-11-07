@@ -28,7 +28,7 @@ import { ScheduleStore } from "./schedules/store.js";
 import { scheduleRoute } from "./schedules/routes.js";
 import { ScheduleService } from "./schedules/service.js";
 
-const rawPort = process.env.PORT ?? "3000";
+const rawPort = process.env.PORT ?? "2120";
 if (!/^\d+$/.test(rawPort) || Number(rawPort) < 1 || Number(rawPort) > 65535)
   throw new Error("PORT must be an integer between 1 and 65535");
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
@@ -53,7 +53,7 @@ const recordingPreferences = new RecordingPreferences(store.pool);
 const schedules = new ScheduleStore(store.pool, placeholders);
 
 const agents = new AgentsClient(
-  process.env.AGENTS_URL ?? "http://127.0.0.1:3100",
+  process.env.AGENTS_URL ?? "http://127.0.0.1:2130",
   process.env.AGENTS_API_TOKEN ?? "",
 );
 const runs = new RunService(store, agents, recordings, database);
