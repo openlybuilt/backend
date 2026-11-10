@@ -1,5 +1,6 @@
 import type pg from "pg";
 import type { WorkflowStep } from "../workflows/definition.js";
+import type { PrewarmStep } from "../workflows/prewarm.js";
 
 export type RunEvent = {
   sequence: number;
@@ -9,6 +10,7 @@ export type RunEvent = {
   durationMs?: number;
 } & (
   | { kind: "step"; stepIndex: number; stepType: WorkflowStep["type"] }
+  | { kind: "prewarming"; stepIndex: number; stepType: PrewarmStep["type"] }
   | { kind: "model"; usage?: { inputTokens: number; outputTokens: number } }
   | {
       kind: "action";
@@ -50,7 +52,7 @@ export function parseEventBatch(value: unknown): RunEvent[] {
       !Number.isFinite(Date.parse(event.timestamp)) ||
       new Date(event.timestamp).toISOString() !== event.timestamp ||
       typeof event.kind !== "string" ||
-      !["step", "model", "action"].includes(event.kind) ||
+      !["step", "prewarming", "model", "action"].includes(event.kind) ||
       typeof event.status !== "string" ||
       !["running", "completed", "failed", "cancelled"].includes(event.status) ||
       (event.stepIndex !== undefined && !integer(event.stepIndex, 0, 29)) ||
@@ -64,7 +66,7 @@ export function parseEventBatch(value: unknown): RunEvent[] {
       "status",
       "stepIndex",
       "durationMs",
-      ...(event.kind === "step"
+      ...(event.kind === "step" || event.kind === "prewarming"
         ? ["stepType"]
         : event.kind === "model"
           ? ["usage"]
@@ -87,6 +89,13 @@ export function parseEventBatch(value: unknown): RunEvent[] {
         ].includes(event.stepType))
     )
       throw new Error("Invalid step event");
+    if (
+      event.kind === "prewarming" &&
+      (!integer(event.stepIndex, 0, 29) ||
+        typeof event.stepType !== "string" ||
+        !["goto", "fill", "click", "wait_for"].includes(event.stepType))
+    )
+      throw new Error("Invalid prewarming event");
     if (
       event.kind === "action" &&
       (typeof event.action !== "string" ||
