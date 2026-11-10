@@ -357,6 +357,7 @@ export class RunStore {
         const r = result as Record<string, unknown>;
         result = {
           status,
+          ...(r.message === "Prewarming failed" ? { message: r.message } : {}),
           ...(r.logsPartial === true ? { logsPartial: true } : {}),
           ...(Array.isArray(r.steps) ? { steps: safeSteps(r.steps) } : {}),
         };

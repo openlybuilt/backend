@@ -1,3 +1,4 @@
+import { parsePrewarm, type PrewarmStep } from "./prewarm.js";
 export type ExecutionTarget = "browser" | "windows";
 export type ProviderId = string;
 export type WorkflowStep =
@@ -190,6 +191,7 @@ export type WorkflowDefinition = {
   description: string;
   inputs: string[];
   steps: WorkflowStep[];
+  prewarm?: PrewarmStep[];
 };
 const inputName = /^[A-Za-z][A-Za-z0-9_]{0,49}$/;
 const template = /\{\{([A-Za-z][A-Za-z0-9_]{0,49})\}\}/g;
@@ -259,6 +261,7 @@ export function parseDefinition(input: unknown): WorkflowDefinition {
           "steps",
           "executionTarget",
           "provider",
+          "prewarm",
         ].includes(key),
     ) ||
     typeof value.name !== "string" ||
@@ -277,6 +280,14 @@ export function parseDefinition(input: unknown): WorkflowDefinition {
   )
     throw new Error("Invalid workflow definition");
   const inputs = value.inputs as string[];
+  const prewarm =
+    value.prewarm === undefined ? undefined : parsePrewarm(value.prewarm);
+  if (
+    prewarm &&
+    (executionTarget !== "browser" ||
+      (provider !== undefined && provider !== "onkernel"))
+  )
+    throw new Error("Prewarming requires an OnKernel browser workflow");
   const source = JSON.stringify(value.steps);
   const references = [...source.matchAll(template)].map((match) => match[1]);
   if (references.some((name) => !inputs.includes(name!)))
@@ -314,5 +325,6 @@ export function parseDefinition(input: unknown): WorkflowDefinition {
     description: (value.description as string | undefined) ?? "",
     inputs,
     steps: value.steps as WorkflowStep[],
+    ...(prewarm ? { prewarm } : {}),
   };
 }

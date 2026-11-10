@@ -13,7 +13,7 @@ import { RecordingStore } from "./recordings/store.js";
 import { RecordingPreferences } from "./recordings/preferences.js";
 import { recordingPlayback, recordingUpload } from "./recordings/routes.js";
 import { EventStore, parseEventBatch } from "./runs/events.js";
-import { AgentsClient } from "./runs/agents-client.js";
+import { AgentsClient, agentRequestBody } from "./runs/agents-client.js";
 import { parseRun } from "./runs/contracts.js";
 import { parseUpdate } from "./runs/updates.js";
 import { RunService } from "./runs/service.js";
@@ -22,6 +22,10 @@ import { GuideExampleStore } from "./runs/guide-examples.js";
 import { workflowCleanupGraceMs } from "./runs/timing.js";
 import { WorkflowStore } from "./workflows/store.js";
 import { parseDefinition, resolveWorkflow } from "./workflows/definition.js";
+import {
+  prewarmPlaceholderNames,
+  resolvePrewarm,
+} from "./workflows/prewarm.js";
 import { WorkspaceStore } from "./workspaces/store.js";
 import { PlaceholderStore } from "./placeholders/store.js";
 import { ScheduleStore } from "./schedules/store.js";
@@ -687,6 +691,15 @@ const server = createServer((request, response) => {
           workspaceId,
           version.definition.inputs,
         );
+        const prewarmInputs = await placeholders.resolve(
+          workspaceId,
+          prewarmPlaceholderNames(version.definition.prewarm ?? []),
+        );
+        if (prewarmInputs.missing.length)
+          return send(response, 400, {
+            error: "Missing prewarming placeholder values",
+            missing: prewarmInputs.missing,
+          });
         if (resolvedInputs.missing.length)
           return send(response, 400, {
             error: "Missing placeholder values",
@@ -701,6 +714,7 @@ const server = createServer((request, response) => {
           });
         let input;
         let resolved;
+        let prewarm;
         try {
           input = parseRun({
             id: body.id,
@@ -710,7 +724,17 @@ const server = createServer((request, response) => {
             recordingEnabled: body.recordingEnabled,
           });
           resolved = resolveWorkflow(version.definition, resolvedInputs.values);
+          prewarm = version.definition.prewarm
+            ? resolvePrewarm(version.definition.prewarm, prewarmInputs.values)
+            : undefined;
           if (body.timeoutMs === undefined) input.timeoutMs = 3600000;
+          if (prewarm)
+            agentRequestBody({
+              ...input,
+              recordingEnabled: false,
+              workflow: resolved,
+              prewarm,
+            });
         } catch (error) {
           return send(response, 400, {
             error: resolvedInputs.secretNames.length
@@ -729,15 +753,19 @@ const server = createServer((request, response) => {
                 ...input,
                 workspaceId,
                 workflow: resolved,
+                ...(prewarm ? { prewarm } : {}),
                 workflowId,
                 workflowVersion: versionNumber,
-                containsSecrets: resolvedInputs.secretNames.length > 0,
+                containsSecrets:
+                  resolvedInputs.secretNames.length > 0 ||
+                  prewarmInputs.secretNames.length > 0,
                 requestFingerprint: placeholders.fingerprint({
                   workspaceId,
                   workflowId,
                   version: versionNumber,
                   input,
                   resolved,
+                  prewarm,
                 }),
               }),
             ),

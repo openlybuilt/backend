@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { parseDefinition, resolveWorkflow } from "../workflows/definition.js";
+import {
+  prewarmPlaceholderNames,
+  resolvePrewarm,
+} from "../workflows/prewarm.js";
 import type { PlaceholderStore } from "../placeholders/store.js";
 import { isDatabaseFailure } from "../database.js";
 import { nextWeekly } from "./weekly.js";
@@ -179,15 +183,23 @@ export class ScheduleStore {
         "Fix the workflow before resuming.",
       );
     }
+    const requiredNames = [
+      ...new Set([
+        ...definition.inputs,
+        ...prewarmPlaceholderNames(definition.prewarm ?? []),
+      ]),
+    ];
     const secrets = await client.query<{ name: string; secret: boolean }>(
       "SELECT name,secret FROM placeholders WHERE workspace_id=$1 AND name=ANY($2::text[]) ORDER BY name FOR SHARE",
-      [workspaceId, definition.inputs],
+      [workspaceId, requiredNames],
     );
     return {
       version: version.rows[0].version,
       definition,
-      names: secrets.rows.filter((row) => row.secret).map((row) => row.name),
-      missing: definition.inputs.filter(
+      names: secrets.rows
+        .filter((row) => row.secret && definition.inputs.includes(row.name))
+        .map((row) => row.name),
+      missing: requiredNames.filter(
         (name) => !secrets.rows.some((row) => row.name === name),
       ),
     };
@@ -198,10 +210,16 @@ export class ScheduleStore {
     definition: ReturnType<typeof parseDefinition>,
   ) {
     let values: Awaited<ReturnType<PlaceholderStore["resolve"]>>;
+    let prewarmValues: Awaited<ReturnType<PlaceholderStore["resolve"]>>;
     try {
       values = await this.placeholders.resolve(
         workspaceId,
         definition.inputs,
+        client,
+      );
+      prewarmValues = await this.placeholders.resolve(
+        workspaceId,
+        prewarmPlaceholderNames(definition.prewarm ?? []),
         client,
       );
     } catch (error) {
@@ -219,13 +237,15 @@ export class ScheduleStore {
         "Fix the workflow or its placeholder values before resuming.",
       );
     }
-    if (values.missing.length)
+    if (values.missing.length || prewarmValues.missing.length)
       throw new ScheduleConflict(
         "missing_placeholders",
         "Save all required placeholder values before resuming.",
       );
     try {
       resolveWorkflow(definition, values.values);
+      if (definition.prewarm)
+        resolvePrewarm(definition.prewarm, prewarmValues.values);
     } catch {
       throw new ScheduleConflict(
         "invalid_workflow",
