@@ -5,6 +5,11 @@ import { PlaceholderStore } from "../placeholders/store.js";
 import { parseRun, type RunRequest } from "../runs/contracts.js";
 import { RunStore } from "../runs/store.js";
 import { parseDefinition, resolveWorkflow } from "../workflows/definition.js";
+import {
+  prewarmPlaceholderNames,
+  resolvePrewarm,
+} from "../workflows/prewarm.js";
+import { agentRequestBody } from "../runs/agents-client.js";
 
 type Candidate = {
   id: string;
@@ -89,6 +94,7 @@ export async function reserveNext(
     let latest: { version: number; definition: unknown };
     let definition: ReturnType<typeof parseDefinition>;
     let inputs: Awaited<ReturnType<PlaceholderStore["resolve"]>>;
+    let prewarmInputs: Awaited<ReturnType<PlaceholderStore["resolve"]>>;
     try {
       if (!version.rows[0]) throw new Error("Workflow version missing");
       latest = version.rows[0];
@@ -96,6 +102,11 @@ export async function reserveNext(
       inputs = await placeholders.resolve(
         schedule.workspace_id,
         definition.inputs,
+        client,
+      );
+      prewarmInputs = await placeholders.resolve(
+        schedule.workspace_id,
+        prewarmPlaceholderNames(definition.prewarm ?? []),
         client,
       );
     } catch (error) {
@@ -116,7 +127,7 @@ export async function reserveNext(
       await client.query("COMMIT");
       return undefined;
     }
-    if (inputs.missing.length) {
+    if (inputs.missing.length || prewarmInputs.missing.length) {
       await client.query(
         "UPDATE workflow_schedules SET issue='missing_placeholders',required_secret_names=$2 WHERE id=$1",
         [schedule.schedule_id, inputs.secretNames],
@@ -139,8 +150,12 @@ export async function reserveNext(
       return undefined;
     }
     let resolved;
+    let prewarm;
     try {
       resolved = resolveWorkflow(definition, inputs.values);
+      prewarm = definition.prewarm
+        ? resolvePrewarm(definition.prewarm, prewarmInputs.values)
+        : undefined;
     } catch {
       await client.query(
         "UPDATE workflow_schedules SET issue='invalid_workflow' WHERE id=$1",
@@ -160,17 +175,31 @@ export async function reserveNext(
       ...input,
       workspaceId: schedule.workspace_id,
       workflow: resolved,
+      ...(prewarm ? { prewarm } : {}),
       workflowId: schedule.workflow_id,
       workflowVersion: latest.version,
-      containsSecrets: inputs.secretNames.length > 0,
+      containsSecrets:
+        inputs.secretNames.length > 0 || prewarmInputs.secretNames.length > 0,
       requestFingerprint: placeholders.fingerprint({
         workspaceId: schedule.workspace_id,
         workflowId: schedule.workflow_id,
         version: latest.version,
         input,
         resolved,
+        prewarm,
       }),
     };
+    try {
+      if (prewarm) agentRequestBody({ ...request, recordingEnabled: false });
+    } catch {
+      await client.query(
+        "UPDATE workflow_schedules SET issue='invalid_workflow' WHERE id=$1",
+        [schedule.schedule_id],
+      );
+      database.assertReady(signal);
+      await client.query("COMMIT");
+      return undefined;
+    }
     await runs.insert(request, client);
     await client.query(
       "UPDATE schedule_occurrences SET status='dispatching',run_id=$2 WHERE id=$1",

@@ -3,12 +3,14 @@ import type {
   ProviderId,
   ResolvedWorkflow,
 } from "../workflows/definition.js";
+import type { ResolvedPrewarmStep } from "../workflows/prewarm.js";
 export type RunRequest = {
   id: string;
   instruction: string;
   maxSteps: number;
   timeoutMs: number;
   workflow?: ResolvedWorkflow;
+  prewarm?: ResolvedPrewarmStep[];
   workflowId?: string;
   workflowVersion?: number;
   workflowInputs?: Record<string, string>;

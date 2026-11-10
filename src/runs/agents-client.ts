@@ -1,4 +1,18 @@
 import type { RunRequest } from "./contracts.js";
+export function agentRequestBody(body: RunRequest): string {
+  const data = JSON.stringify({
+    id: body.id,
+    instruction: body.instruction,
+    maxSteps: body.maxSteps,
+    timeoutMs: body.timeoutMs,
+    ...(body.recordingEnabled === false ? { recordingEnabled: false } : {}),
+    ...(body.workflow ? { workflow: body.workflow } : {}),
+    ...(body.prewarm ? { prewarm: body.prewarm } : {}),
+  });
+  if (Buffer.byteLength(data) > 32000)
+    throw new Error("Workflow and prewarming values are too large to run");
+  return data;
+}
 import type { ExecutionTarget, ProviderId } from "../workflows/definition.js";
 export type ProviderCapability = {
   id: ProviderId;
@@ -138,18 +152,7 @@ export class AgentsClient {
         authorization: `Bearer ${this.token}`,
         ...(body ? { "content-type": "application/json" } : {}),
       },
-      body: body
-        ? JSON.stringify({
-            id: body.id,
-            instruction: body.instruction,
-            maxSteps: body.maxSteps,
-            timeoutMs: body.timeoutMs,
-            ...(body.recordingEnabled === false
-              ? { recordingEnabled: false }
-              : {}),
-            ...(body.workflow ? { workflow: body.workflow } : {}),
-          })
-        : undefined,
+      body: body ? agentRequestBody(body) : undefined,
       signal: AbortSignal.any([
         AbortSignal.timeout(10000),
         ...(signal ? [signal] : []),
